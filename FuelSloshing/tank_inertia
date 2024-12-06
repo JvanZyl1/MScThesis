@@ -1,0 +1,231 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
+import pickle
+from tqdm import tqdm
+
+class CylindricalTank:
+    def __init__(self,
+                 R,
+                 H,
+                 g,
+                 fill_level,
+                 n_points = 1000):
+        """
+        Initializes the cylindrical tank with the given parameters.
+
+        Parameters:
+        R (float): Radius of the cylindrical tank (in meters)
+        H (float): Height of the cylindrical tank (in meters)
+        g (array-like): Gravity vector [0, 0, g] in the World's frame (in m/s^2)
+        fill_level (float): Liquid height in meters (between 0 and H)
+        n_points (int): Number of points to approximate the volume
+        """
+        self.R = R
+        self.H = H
+        self.g = np.array([0, 0, g])  # Gravity vector in the World's frame
+        self.fill_level = fill_level
+        self.n_points = n_points # Number of points to approximate the volume
+
+        # Calculate the effective gravity vector in the tank's frame
+        self.pitch = 0  # Pitch angle in radians
+        self.roll = 0  # Roll angle in radians
+        self.yaw = 0  # Yaw angle in radians
+        self.R_matrix = self.rotation_matrix(self.pitch, self.roll, self.yaw)
+        self.g_eff_calc(self.pitch, self.roll, self.yaw)
+
+    def calculate_liquid_surface(self):
+        """
+        Calculates the liquid surface plane within the cylindrical tank.
+
+        Returns:
+        X_plane, Y_plane, Z_plane_fill (ndarray): Meshgrid representing the liquid surface within the tank
+        """
+        # Create grid for plane calculation
+        x_plane = np.linspace(-self.R, self.R, 100)
+        y_plane = np.linspace(-self.R, self.R, 100)
+        X_plane, Y_plane = np.meshgrid(x_plane, y_plane)
+        Z_plane_fill = self.fill_level - (self.g_eff[0] * X_plane + self.g_eff[1] * Y_plane) / self.g_eff[2]
+
+        # Mask points outside the tank radius and out of tank height range
+        mask_fill = (X_plane**2 + Y_plane**2 > self.R**2) | (Z_plane_fill < 0) | (Z_plane_fill > self.H)
+        Z_plane_fill[mask_fill] = np.nan
+
+        return X_plane, Y_plane, Z_plane_fill
+
+    def plot_liquid_surface(self):
+        """
+        Plots the liquid surface in the cylindrical tank.
+        """
+        # Generate cylindrical tank grid
+        theta = np.linspace(0, 2 * np.pi, 100)  # Angular positions around the cylinder (0 to 2*pi)
+        z = np.linspace(0, self.H, 100)  # Height positions along the cylinder (from 0 to H)
+        Theta, Z = np.meshgrid(theta, z)  # Create a meshgrid for angular and height positions
+        Y = self.R * np.cos(Theta)  # Y-coordinates of the cylindrical surface
+        X = self.R * np.sin(Theta)  # X-coordinates of the cylindrical surface
+
+        # Calculate liquid surface
+        X_plane, Y_plane, Z_plane_fill = self.calculate_liquid_surface()
+
+        # Plot tank and liquid surface with specific fill level
+        fig = plt.figure(figsize=(10, 7))
+        ax = fig.add_subplot(111, projection='3d')
+        ax.plot_surface(Y, X, Z, alpha=0.3, color='blue', edgecolor='none')  # Tank surface
+        ax.plot_surface(X_plane, Y_plane, Z_plane_fill, alpha=0.7, color='cyan')  # Liquid surface at fill level
+
+        # Labels and limits
+        ax.set_xlabel('X (m)')
+        ax.set_ylabel('Y (m)')
+        ax.set_zlabel('Z (m)')
+        ax.set_xlim([-self.R, self.R])
+        ax.set_ylim([-self.R, self.R])
+        ax.set_zlim([0, self.H])
+        ax.set_title('Liquid Surface with Specific Fill Level in a Cylindrical Tank')
+
+        plt.show()
+
+    def calculate_inertia_matrix(self):
+        """
+        Calculates the inertia matrix of the tilted fuel in the cylindrical tank.
+
+        Returns:
+        I (ndarray): 3x3 inertia matrix of the liquid fuel
+        """
+        # Create a grid of points within the cylindrical tank
+        x = np.random.uniform(-self.R, self.R, self.n_points)
+        y = np.random.uniform(-self.R, self.R, self.n_points)
+
+        # Mask points outside the cylindrical radius
+        mask_cylinder = x**2 + y**2 <= self.R**2
+        x = x[mask_cylinder]
+        y = y[mask_cylinder]
+
+        # Calculate the height of the tilted liquid surface at each (x, y) point
+        z_plane_fill = self.fill_level - (self.g_eff[0] * x + self.g_eff[1] * y) / self.g_eff[2]
+        z_plane_fill = np.clip(z_plane_fill, 0, self.H)  # Ensure z values are within valid height range
+
+        # Integrate over valid z values for each (x, y)
+        Ixx, Iyy, Izz, Ixy, Ixz, Iyz = 0, 0, 0, 0, 0, 0
+        for i in range(len(x)):
+            z_vals = np.linspace(0, z_plane_fill[i], 100)  # Discretize z from 0 to the surface height
+            dz = z_vals[1] - z_vals[0]  # Differential element for integration
+
+            # Calculate inertia contributions from each z slice
+            Ixx += np.sum((y[i]**2 + z_vals**2) * dz)
+            Iyy += np.sum((x[i]**2 + z_vals**2) * dz)
+            Izz += np.sum((x[i]**2 + y[i]**2) * dz)
+            Ixy -= np.sum((x[i] * y[i]) * dz)
+            Ixz -= np.sum((x[i] * z_vals) * dz)
+            Iyz -= np.sum((y[i] * z_vals) * dz)
+
+        # Form the inertia matrix
+        I = np.array([[Ixx, Ixy, Ixz],
+                      [Ixy, Iyy, Iyz],
+                      [Ixz, Iyz, Izz]])
+
+        return I
+
+    def rotation_matrix(self, pitch, roll, yaw):
+        """
+        Calculates the rotation matrix for given pitch, roll, and yaw angles.
+
+        Parameters:
+        pitch (float): Rotation around the y-axis in radians
+        roll (float): Rotation around the x-axis in radians
+        yaw (float): Rotation around the z-axis in radians
+
+        Returns:
+        R (ndarray): 3x3 rotation matrix
+        """
+        # Rotation matrix for roll (x-axis)
+        Rx = np.array([[1, 0, 0],
+                       [0, np.cos(roll), -np.sin(roll)],
+                       [0, np.sin(roll), np.cos(roll)]])
+
+        # Rotation matrix for pitch (y-axis)
+        Ry = np.array([[np.cos(pitch), 0, np.sin(pitch)],
+                       [0, 1, 0],
+                       [-np.sin(pitch), 0, np.cos(pitch)]])
+
+        # Rotation matrix for yaw (z-axis)
+        Rz = np.array([[np.cos(yaw), -np.sin(yaw), 0],
+                       [np.sin(yaw), np.cos(yaw), 0],
+                       [0, 0, 1]])
+
+        # Combined rotation matrix: R = Rz * Ry * Rx
+        R = Rz @ Ry @ Rx
+
+        return R
+    
+    def g_eff_calc(self, pitch, roll, yaw):
+        """
+        Calculates the effective gravity vector in the tank's frame.
+
+        Parameters:
+        pitch (float): Pitch angle in radians
+        roll (float): Roll angle in radians
+        yaw (float): Yaw angle in radians
+
+        Returns:
+        g_eff (ndarray): Effective gravity vector in the tank's frame
+        """
+        self.pitch = pitch
+        self.roll = roll
+        self.yaw = yaw
+
+        R_matrix = self.rotation_matrix(pitch, roll, yaw)
+        self.g_eff = R_matrix.T @ self.g
+
+    def main(self, pitch, roll, yaw):
+        """
+        Main function to calculate the inertia matrix of the tilted fuel in the cylindrical tank.
+
+        Parameters:
+        pitch (float): Pitch angle in radians
+        roll (float): Roll angle in radians
+        yaw (float): Yaw angle in radians
+
+        Returns:
+        I (ndarray): 3x3 inertia matrix of the liquid fuel
+        """
+        self.g_eff_calc(pitch, roll, yaw)
+        I = self.calculate_inertia_matrix()
+
+        return I
+
+# Example usage
+R = 1.0  # Radius of the cylindrical tank (in meters)
+H = 2.0  # Height of the cylindrical tank (in meters)
+g = -9.81 # Effective gravity vector [gx, gy, gz]
+fill_level = H*0.8  # Liquid height in meters (between 0 and H)
+
+pitch = np.radians(10)  # Pitch angle in radians
+roll = np.radians(5)    # Roll angle in radians
+yaw = np.radians(15)    # Yaw angle in radians
+
+tank = CylindricalTank(R, H, g, fill_level)
+I = tank.main(pitch,
+              roll,
+              yaw)
+print("Inertia matrix of the tilted fuel:")
+print(I)
+
+tank.plot_liquid_surface()
+
+# Create dataset for fill_level, pitch yaw and roll to later train a NN
+pitch_vals = np.linspace(-np.pi/2, np.pi/2, 20)
+roll_vals = np.linspace(-np.pi/2, np.pi/2, 20)
+yaw_vals = np.linspace(-np.pi/2, np.pi/2, 20)
+fill_level_vals = np.linspace(0, H, 20)
+
+dataset = []
+for pitch in tqdm(pitch_vals, desc="Pitch"):
+    for roll in tqdm(roll_vals, desc="Roll", leave=False):
+        for yaw in tqdm(yaw_vals, desc="Yaw", leave=False):
+            for fill_level in tqdm(fill_level_vals, desc="Fill Level", leave=False):
+                tank = CylindricalTank(R, H, g, fill_level)
+                I = tank.main(pitch, roll, yaw)
+                dataset.append([pitch, roll, yaw, fill_level, I])
+    # Save the dataset
+    with open('dataset_new_new.pkl', 'wb') as f:
+        pickle.dump(dataset, f)
