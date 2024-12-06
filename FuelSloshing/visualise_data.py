@@ -2,6 +2,8 @@ import pickle
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.interpolate import griddata
+from numpy.polynomial.polynomial import Polynomial
+from scipy.optimize import curve_fit
 
 # Load dataset
 with open('dataset_new_new.pkl', 'rb') as f:
@@ -46,6 +48,21 @@ else:
     grid_I_yy = griddata((roll_vals, pitch_vals), I_yy, (grid_x, grid_y), method='cubic')
     grid_I_zz = griddata((roll_vals, pitch_vals), I_zz, (grid_x, grid_y), method='cubic')
 
+    # Define a 2D polynomial fitting function
+    def poly_2d(xy, a, b, c, d, e, f):
+        x, y = xy
+        return a + b*x + c*y + d*x*y + e*x**2 + f*y**2
+
+    # Fit polynomials to the data for I_xx, I_yy, I_zz
+    popt_xx, _ = curve_fit(poly_2d, (roll_vals, pitch_vals), I_xx)
+    popt_yy, _ = curve_fit(poly_2d, (roll_vals, pitch_vals), I_yy)
+    popt_zz, _ = curve_fit(poly_2d, (roll_vals, pitch_vals), I_zz)
+
+    # Evaluate polynomial fit over the grid
+    fitted_I_xx = poly_2d((grid_x.ravel(), grid_y.ravel()), *popt_xx).reshape(grid_x.shape)
+    fitted_I_yy = poly_2d((grid_x.ravel(), grid_y.ravel()), *popt_yy).reshape(grid_x.shape)
+    fitted_I_zz = poly_2d((grid_x.ravel(), grid_y.ravel()), *popt_zz).reshape(grid_x.shape)
+
     # Plotting the symmetric entries as contour plots
     fig, axs = plt.subplots(1, 3, figsize=(18, 6))
 
@@ -55,6 +72,7 @@ else:
     axs[0].set_ylabel('Pitch (rad)')
     axs[0].set_title('I_xx Contour')
     fig.colorbar(cs1, ax=axs[0])
+    axs[0].contour(grid_x, grid_y, fitted_I_xx, levels=20, colors='k', linestyles='dashed')  # Polynomial fit overlay
 
     # Contour plot for I_yy
     cs2 = axs[1].contourf(grid_x, grid_y, grid_I_yy, levels=20, cmap='plasma')
@@ -62,6 +80,7 @@ else:
     axs[1].set_ylabel('Pitch (rad)')
     axs[1].set_title('I_yy Contour')
     fig.colorbar(cs2, ax=axs[1])
+    axs[1].contour(grid_x, grid_y, fitted_I_yy, levels=20, colors='k', linestyles='dashed')  # Polynomial fit overlay
 
     # Contour plot for I_zz
     cs3 = axs[2].contourf(grid_x, grid_y, grid_I_zz, levels=20, cmap='inferno')
@@ -69,11 +88,10 @@ else:
     axs[2].set_ylabel('Pitch (rad)')
     axs[2].set_title('I_zz Contour')
     fig.colorbar(cs3, ax=axs[2])
+    axs[2].contour(grid_x, grid_y, fitted_I_zz, levels=20, colors='k', linestyles='dashed')  # Polynomial fit overlay
 
-        # Set the overall title with yaw angle and fill level
-    yaw_value = yaw_value_to_plot  # Yaw value used for filtering
-    fill_value = fill_level_value_to_plot  # Fill level used for filtering
-    fig.suptitle(f'Contour Plots for Yaw Angle ~ {yaw_value:.2f} rad, Fill Level ~ {fill_value:.2f} m', fontsize=16)
+    # Set the overall title with yaw angle and fill level
+    fig.suptitle(f'Contour Plots for Yaw Angle ~ {yaw_value_to_plot:.2f} rad, Fill Level ~ {fill_level_value_to_plot:.2f} m', fontsize=16)
 
     plt.tight_layout()
     plt.subplots_adjust(top=0.9)  # Adjust to fit the suptitle
