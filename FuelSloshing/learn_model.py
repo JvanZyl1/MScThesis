@@ -8,110 +8,114 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 
-# Load dataset
-with open('dataset_new_new.pkl', 'rb') as f:
-    dataset = pickle.load(f)
+class InertiaModel:
+    def __init__(self, dataset_path, model_path='inertia_nn_model.pth'):
+        self.dataset_path = dataset_path
+        self.model_path = model_path
+        self.scaler = StandardScaler()
+        self.model = self._build_model()
+        self.criterion = nn.MSELoss()
+        self.optimizer = optim.Adam(self.model.parameters(), lr=0.001)
+        self._load_dataset()
+        self._prepare_data()
 
-# Prepare data for training
-X = np.array([data[:4] for data in dataset])  # Inputs: pitch, roll, yaw, fill_level
-y = np.array([data[4].flatten() for data in dataset])  # Outputs: flattened inertia matrix
+    def _build_model(self):
+        class InertiaNN(nn.Module):
+            def __init__(self, input_size, output_size):
+                super(InertiaNN, self).__init__()
+                self.fc1 = nn.Linear(input_size, 64)
+                self.fc2 = nn.Linear(64, 64)
+                self.fc3 = nn.Linear(64, output_size)
 
-# Split the dataset
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+            def forward(self, x):
+                x = torch.relu(self.fc1(x))
+                x = torch.relu(self.fc2(x))
+                x = self.fc3(x)
+                return x
 
-# Normalize the input data
-scaler = StandardScaler()
-X_train = scaler.fit_transform(X_train)
-X_test = scaler.transform(X_test)
+        return InertiaNN(input_size=4, output_size=9)  # Adjust input and output sizes as needed
 
-# Convert to PyTorch tensors
-X_train = torch.tensor(X_train, dtype=torch.float32)
-X_test = torch.tensor(X_test, dtype=torch.float32)
-y_train = torch.tensor(y_train, dtype=torch.float32)
-y_test = torch.tensor(y_test, dtype=torch.float32)
+    def _load_dataset(self):
+        with open(self.dataset_path, 'rb') as f:
+            self.dataset = pickle.load(f)
 
-# Create DataLoader
-train_dataset = TensorDataset(X_train, y_train)
-test_dataset = TensorDataset(X_test, y_test)
-train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
-test_loader = DataLoader(test_dataset, batch_size=32, shuffle=False)
+    def _prepare_data(self):
+        X = np.array([data[:4] for data in self.dataset])  # Inputs: pitch, roll, yaw, fill_level
+        y = np.array([data[4].flatten() for data in self.dataset])  # Outputs: flattened inertia matrix
 
-# Define the neural network model
-class InertiaNN(nn.Module):
-    def __init__(self):
-        super(InertiaNN, self).__init__()
-        self.fc1 = nn.Linear(X_train.shape[1], 64)
-        self.fc2 = nn.Linear(64, 64)
-        self.fc3 = nn.Linear(64, y_train.shape[1])  # Adjust output layer to match flattened inertia matrix size
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
-    def forward(self, x):
-        x = torch.relu(self.fc1(x))
-        x = torch.relu(self.fc2(x))
-        x = self.fc3(x)
-        return x
+        X_train = self.scaler.fit_transform(X_train)
+        X_test = self.scaler.transform(X_test)
 
-model = InertiaNN()
+        self.X_train = torch.tensor(X_train, dtype=torch.float32)
+        self.X_test = torch.tensor(X_test, dtype=torch.float32)
+        self.y_train = torch.tensor(y_train, dtype=torch.float32)
+        self.y_test = torch.tensor(y_test, dtype=torch.float32)
 
-# Define loss function and optimizer
-criterion = nn.MSELoss()
-optimizer = optim.Adam(model.parameters(), lr=0.001)
+        self.train_loader = DataLoader(TensorDataset(self.X_train, self.y_train), batch_size=32, shuffle=True)
+        self.test_loader = DataLoader(TensorDataset(self.X_test, self.y_test), batch_size=32, shuffle=False)
 
-# Train the model
-num_epochs = 100
-for epoch in tqdm(range(num_epochs), desc="Training"):
-    model.train()
-    for inputs, targets in train_loader:
-        optimizer.zero_grad()
-        outputs = model(inputs)
-        loss = criterion(outputs, targets)
-        loss.backward()
-        optimizer.step()
+    def train(self, num_epochs=100):
+        for epoch in tqdm(range(num_epochs), desc="Training"):
+            self.model.train()
+            for inputs, targets in self.train_loader:
+                self.optimizer.zero_grad()
+                outputs = self.model(inputs)
+                loss = self.criterion(outputs, targets)
+                loss.backward()
+                self.optimizer.step()
 
-# Evaluate the model
-model.eval()
-test_loss = 0.0
-with torch.no_grad():
-    for inputs, targets in test_loader:
-        outputs = model(inputs)
-        loss = criterion(outputs, targets)
-        test_loss += loss.item()
+    def evaluate(self):
+        self.model.eval()
+        test_loss = 0.0
+        with torch.no_grad():
+            for inputs, targets in self.test_loader:
+                outputs = self.model(inputs)
+                loss = self.criterion(outputs, targets)
+                test_loss += loss.item()
 
-test_loss /= len(test_loader)
-print(f"Mean Squared Error on Test Set: {test_loss}")
+        test_loss /= len(self.test_loader)
+        print(f"Mean Squared Error on Test Set: {test_loss}")
 
-# Save the trained model
-torch.save(model.state_dict(), 'inertia_nn_model.pth')
+    def save_model(self):
+        torch.save(self.model.state_dict(), self.model_path)
 
-# Load the trained model
-loaded_model = InertiaNN()
-loaded_model.load_state_dict(torch.load('inertia_nn_model.pth', weights_only=True))
-loaded_model.eval()
+    def load_model(self):
+        self.model.load_state_dict(torch.load(self.model_path, weights_only=True))
+        self.model.eval()
 
-# Select a ground truth inertia matrix from the dataset
-# Change this index to select a different example - Randomly select an index between 0 and len(dataset)
-selected_index =   np.random.randint(0, len(dataset))
-ground_truth_data = dataset[selected_index]
-ground_truth_input = ground_truth_data[:4]
-ground_truth_inertia = ground_truth_data[4].flatten()
+    def predict(self, input_data):
+        input_scaled = self.scaler.transform([input_data])
+        input_tensor = torch.tensor(input_scaled, dtype=torch.float32)
+        with torch.no_grad():
+            predicted_inertia = self.model(input_tensor)
+        return predicted_inertia.numpy()
 
-# Scale the ground truth input
-ground_truth_input_scaled = scaler.transform([ground_truth_input])
-ground_truth_input_tensor = torch.tensor(ground_truth_input_scaled, dtype=torch.float32)
+    def compare_ground_truth(self):
+        selected_index = np.random.randint(0, len(self.dataset))
+        ground_truth_data = self.dataset[selected_index]
+        ground_truth_input = ground_truth_data[:4]
+        ground_truth_inertia = ground_truth_data[4].flatten()
 
-# Predict the inertia matrix using the neural network
-with torch.no_grad():
-    predicted_inertia = loaded_model(ground_truth_input_tensor)
+        predicted_inertia = self.predict(ground_truth_input)
 
-# Print the results
-print("Ground truth input (pitch, roll, yaw, fill_level):")
-print(ground_truth_input)
+        print("Ground truth input (pitch, roll, yaw, fill_level):")
+        print(ground_truth_input)
 
-print("Ground truth inertia matrix (flattened):")
-print(ground_truth_inertia)
+        print("Ground truth inertia matrix (flattened):")
+        print(ground_truth_inertia)
 
-print("Predicted inertia matrix (flattened):")
-print(predicted_inertia.numpy())
+        print("Predicted inertia matrix (flattened):")
+        print(predicted_inertia)
 
-# Calculate and print the Mean Squared Error for the selected example
-mse = np.mean((predicted_inertia.numpy() - ground_truth_inertia) ** 2)
-print(f"Mean Squared Error for the selected example: {mse}")
+        mse = np.mean((predicted_inertia - ground_truth_inertia) ** 2)
+        print(f"Mean Squared Error for the selected example: {mse}")
+
+# Example usage
+model = InertiaModel(dataset_path='dataset_new_new.pkl')
+model.load_model()
+#model.train(num_epochs=200) #100 : 630
+model.evaluate()
+#model.save_model()
+model.compare_ground_truth()
