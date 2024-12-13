@@ -394,13 +394,13 @@ class MPOLearner:
         target_std = jnp.clip(target_std, 1e-6, 1e1)
 
         # Debug prints to check the forward pass of the policy network
-        print("Forward pass - current policy network:")
-        print("Current mean shape:", current_mean.shape)
-        print("Current std shape:", current_std.shape)
+        #print("Forward pass - current policy network:")
+        #print("Current mean shape:", current_mean.shape)
+        #print("Current std shape:", current_std.shape)
 
-        print("Forward pass - target policy network:")
-        print("Target mean shape:", target_mean.shape)
-        print("Target std shape:", target_std.shape)
+        #print("Forward pass - target policy network:")
+        #print("Target mean shape:", target_mean.shape)
+        #print("Target std shape:", target_std.shape)
 
         # 3. Compute the actor loss via gaussian likelihood of the sampled actions
         actor_log_prob = gaussian_likelihood(sampled_actions, target_mean, current_std) + gaussian_likelihood(sampled_actions, current_mean, target_std)
@@ -485,9 +485,9 @@ class MPOLearner:
         )
 
         # Debug: Log structures before processing
-        print("Before processing:")
-        print("Parameter tree structure:", jax.tree_util.tree_structure(self.policy_network.params))
-        print("Gradient tree structure:", jax.tree_util.tree_structure(grads))
+        #print("Before processing:")
+        #print("Parameter tree structure:", jax.tree_util.tree_structure(self.policy_network.params))
+        #print("Gradient tree structure:", jax.tree_util.tree_structure(grads))
 
         # Replace None gradients with zeros and ensure structure matches
         grads = jax.tree_util.tree_map(
@@ -497,13 +497,14 @@ class MPOLearner:
         )
 
         # Debug: Log structures after processing
-        print("After processing:")
-        print("Parameter tree structure:", jax.tree_util.tree_structure(self.policy_network.params))
-        print("Gradient tree structure:", jax.tree_util.tree_structure(grads))
+        #print("After processing:")
+        #print("Parameter tree structure:", jax.tree_util.tree_structure(self.policy_network.params))
+        #print("Gradient tree structure:", jax.tree_util.tree_structure(grads))
 
-        # Debugging Individual Components: Print shapes of parameters and corresponding gradients
+        # Debugging Individual Components: #print shapes of parameters and corresponding gradients
         def print_shapes(param, grad):
-            print(f"Parameter shape: {param.shape}, Gradient shape: {grad.shape}")
+            #print(f"Parameter shape: {param.shape}, Gradient shape: {grad.shape}")
+            pass
 
         jax.tree_util.tree_map(print_shapes, self.policy_network.params, grads)
 
@@ -546,19 +547,36 @@ class MPOLearner:
         # 3. Perform the M-step (Parametric policy update)
         actor_loss = self.m_step(states, weights, sampled_actions)
         # 4. Update the priorities if PER is enabled
-
         if isinstance(self.replay_buffer, PrioritizedReplayBuffer):
+            # Debugging: #print shapes of target Q-values and critic network outputs
+            #print("Shapes:")
+            #print("Target Q-values shape:", target_q_values.shape)
+            #print("Critic network output shape:", self.critic_network(states, actions).shape)
+            #print("Indices shape:", indices.shape)
             # Calculate TD errors for priority updates
-            td_errors = jnp.abs(target_q_values - self.critic_network(states, actions)).flatten()
+            scalar_target_q_values = jnp.sum(target_q_values * self.critic_network.support, axis=-1)  # Shape: (10,)
+            #print("Scalar target Q-values shape:", scalar_target_q_values.shape)
+            critic_output_q_values = self.critic_network.evaluate_q_value(states, actions)           # Shape: (10,)
+            #print("Critic output Q-values shape:", critic_output_q_values.shape)
+            td_errors = jnp.abs(scalar_target_q_values - critic_output_q_values).flatten()           # Shape: (10,)
+            #print("TD errors shape:", td_errors.shape)
             self.replay_buffer.update_priorities(indices, td_errors)
 
         # 5. Update the target networks
         if self.config['target_networks']:
             self.target_policy_network = self.target_policy_network.replace(
-                params=self.tau * self.policy_network.params + (1 - self.tau) * self.target_policy_network.params
-            )
-            self.target_critic_network = self.target_critic_network.replace(
-                params=self.tau * self.critic_network.params + (1 - self.tau) * self.target_critic_network.params
+                params=jax.tree_util.tree_map(
+                    lambda p, tp: self.tau * p + (1 - self.tau) * tp,
+                    self.policy_network.params,
+                    self.target_policy_network.params
+                )
             )
 
+            self.target_critic_network = self.target_critic_network.replace(
+                params=jax.tree_util.tree_map(
+                    lambda p, tp: self.tau * p + (1 - self.tau) * tp,
+                    self.critic_network.params,
+                    self.target_critic_network.params
+                )
+            )
         return critic_loss, actor_loss

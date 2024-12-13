@@ -1,5 +1,6 @@
 from src.utils.saving_data import save_agent, save_losses
 from tqdm import tqdm
+import matplotlib.pyplot as plt
 
 class Trainer:
     '''

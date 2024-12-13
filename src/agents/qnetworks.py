@@ -45,6 +45,26 @@ class PolicyNetwork:
             return mean, std
         else:
             return mean
+        
+    def replace(self, params: dict) -> 'PolicyNetwork':
+        """
+        Creates a new PolicyNetwork instance with updated parameters.
+
+        Args:
+            params (dict): New parameters for the policy network.
+
+        Returns:
+            PolicyNetwork: A new PolicyNetwork instance with updated parameters.
+        """
+        new_policy_network = PolicyNetwork(
+            state_dim=self.state_dim,
+            action_dim=self.action_dim,
+            hidden_dim=self.hidden_dim,
+            stochastic=self.stochastic,
+            rng_key=self.key  # Keep the same RNG key for reproducibility.
+        )
+        new_policy_network.params = params
+        return new_policy_network
 
 class CriticNetwork:
     '''
@@ -360,7 +380,9 @@ class DistributionalCriticNetwork(CriticNetwork):
     def evaluate_q_value(self,
                         states: jnp.ndarray,
                         actions: jnp.ndarray) -> jnp.ndarray:
-        # Scalar approximation of the Q-value
+        '''
+        Scalar approximation of the Q-value.
+        '''
         dist = self.forward(states, actions)
         q_value = jnp.sum(dist * self.support, axis=-1)
         return q_value
@@ -499,3 +521,7 @@ class DoubleDistributionalCriticNetwork(CriticNetwork):
         new_critic = DoubleDistributionalCriticNetwork(self.state_dim, self.action_dim, self.hidden_dim)
         new_critic.params = params
         return new_critic
+
+    def __call__(self, state: jnp.ndarray, action: jnp.ndarray) -> jnp.ndarray:
+        return self.evaluate_q_value(state, action)
+

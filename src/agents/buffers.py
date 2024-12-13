@@ -255,7 +255,7 @@ class PrioritizedReplayBuffer:
         # Update beta with decay
         self.beta = min(1.0, self.beta + self.beta_decay)
 
-        states, actions, rewards, next_states, dones = zip(*samples)
+        states, actions, rewards, next_states, dones = map(jnp.array, zip(*samples))
         return (
             jnp.stack(states),
             jnp.stack(actions),
