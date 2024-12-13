@@ -1,8 +1,5 @@
 from collections import deque
 import jax.numpy as jnp
-from jax import random
-from jax import vmap
-import numpy as np
 
 class ReplayBuffer:
     '''
@@ -77,7 +74,7 @@ class ReplayBuffer:
         next_states: next states sampled from the replay buffer [jnp.array]
         dones: dones sampled from the replay buffer [jnp.array]
         '''
-        indices = random.choice(rng_key, len(self.buffer), shape=(batch_size,), replace=False)
+        indices = jax.random.choice(rng_key, len(self.buffer), shape=(batch_size,), replace=False)
         samples = [self.buffer[idx] for idx in indices]
         states, actions, rewards, next_states, dones = zip(*samples)
         return (
@@ -209,7 +206,7 @@ class PrioritizedReplayBuffer:
             priorities = self.priorities[: len(self.buffer)]
 
         probabilities = (priorities ** self.alpha) / jnp.sum(priorities ** self.alpha)
-        indices = random.choice(rng_key, len(self.buffer), shape=(batch_size,), p=probabilities)
+        indices = jax.random.choice(rng_key, len(self.buffer), shape=(batch_size,), p=probabilities)
         samples = [self.buffer[idx] for idx in indices]
 
         weights = (probabilities[indices] * len(self.buffer)) ** (-beta)

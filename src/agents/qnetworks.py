@@ -1,8 +1,6 @@
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
+import jax.numpy as jnpm
 
-class PolicyNetwork(nn.Module):
+class PolicyNetwork:
     '''
     This class represents the policy network; essentially an actor.
     params:
@@ -12,36 +10,40 @@ class PolicyNetwork(nn.Module):
     stochastic: whether the policy is stochastic or deterministic [bool]
 
     returns:
-    mean: mean of the action distribution [tensor]
-    std: standard deviation of the action distribution [tensor]
+    mean: mean of the action distribution [jnp.array]
+    std: standard deviation of the action distribution [jnp.array]
     '''
     def __init__(self,
                  state_dim,
                  action_dim,
                  hidden_dim=256,
-                 stochastic=True):
-        super(PolicyNetwork, self).__init__()
-        self.fc1 = nn.Linear(state_dim, hidden_dim)
-        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
-        self.mean = nn.Linear(hidden_dim, action_dim)
-        self.log_std = nn.Linear(hidden_dim, action_dim)
+                 stochastic=True,
+                 rng_key=None):
+        self.state_dim = state_dim
+        self.action_dim = action_dim
+        self.hidden_dim = hidden_dim
         self.stochastic = stochastic
-    
+        self.key = rng_key
+        self.params = {
+            "fc1": jax.random.normal(rng_key, (state_dim, hidden_dim)),
+            "fc2": jax.random.normal(rng_key, (hidden_dim, hidden_dim)),
+            "mean": jax.random.normal(rng_key, (hidden_dim, action_dim)),
+            "log_std": jax.random.normal(rng_key, (hidden_dim, action_dim))
+        }
+
     def forward(self, state):
-        x = F.relu(self.fc1(state))
-        x = F.relu(self.fc2(x))
-        mean = self.mean(x)
-        
+        x = jax.nn.relu(jnp.dot(state, self.params["fc1"]))
+        x = jax.nn.relu(jnp.dot(x, self.params["fc2"]))
+        mean = jnp.dot(x, self.params["mean"])
+
         if self.stochastic:
-            log_std = self.log_std(x)
-            std = torch.exp(log_std)
+            log_std = jnp.dot(x, self.params["log_std"])
+            std = jnp.exp(log_std)
             return mean, std
         else:
             return mean
-        
-# Critic tings
 
-class BaseCriticNetwork(nn.Module):
+class BaseCriticNetwork:
     '''
     This class represents the base critic network.
     params:
@@ -51,21 +53,21 @@ class BaseCriticNetwork(nn.Module):
     action_dim_size_output: [bool] - determines whether complete critic or has other additional output
 
     returns:
-    x: output of the critic network [tensor]
+    x: output of the critic network [jnp.array]
     '''
-    def __init__(self, state_dim, action_dim, hidden_dim=256, action_dim_size_output = False):
-        super(BaseCriticNetwork, self).__init__()
-        self.fc1 = nn.Linear(state_dim + action_dim, hidden_dim)
-        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
-        if action_dim_size_output:
-            self.fc3 = nn.Linear(hidden_dim, action_dim)
+    def __init__(self, state_dim, action_dim, hidden_dim=256):
+        self.state_dim = state_dim
+        self.action_dim = action_dim
+        self.hidden_dim = hidden_dim
+        self.params = {
+            "fc1": jax.random.normal(jax.random.PRNGKey(0), (state_dim + action_dim, hidden_dim)),
+            "fc2": jax.random.normal(jax.random.PRNGKey(1), (hidden_dim, hidden_dim))
+        }
 
     def forward_base(self, state, action):
-        x = torch.cat([state, action], dim=1)
-        x = F.relu(self.fc1(x))
-        x = F.relu(self.fc2(x))
-        if hasattr(self, 'fc3'):
-            x = self.fc3(x)
+        x = jnp.concatenate([state, action], axis=-1)
+        x = jax.nn.relu(jnp.dot(x, self.params["fc1"]))
+        x = jax.nn.relu(jnp.dot(x, self.params["fc2"]))
         return x
 
 class DoubleCriticNetwork(BaseCriticNetwork):
@@ -77,18 +79,20 @@ class DoubleCriticNetwork(BaseCriticNetwork):
     hidden_dim: dimension of the hidden layers [int]
 
     returns:
-    Q_1: Q-function of the first critic [tensor]
-    Q_2: Q-function of the second critic [tensor]
+    Q_1: Q-function of the first critic [jnp.array]
+    Q_2: Q-function of the second critic [jnp.array]
     '''
     def __init__(self, state_dim, action_dim, hidden_dim=256):
-        super(DoubleCriticNetwork, self).__init__(state_dim, action_dim, hidden_dim)
-        self.Q_1 = nn.Linear(hidden_dim, 1)
-        self.Q_2 = nn.Linear(hidden_dim, 1)
+        super().__init__(state_dim, action_dim, hidden_dim)
+        self.params.update({
+            "Q_1": jax.random.normal(jax.random.PRNGKey(2), (hidden_dim, 1)),
+            "Q_2": jax.random.normal(jax.random.PRNGKey(3), (hidden_dim, 1))
+        })
 
     def forward(self, state, action):
         x = self.forward_base(state, action)
-        Q_1 = self.Q_1(x)
-        Q_2 = self.Q_2(x)
+        Q_1 = jnp.dot(x, self.params["Q_1"])
+        Q_2 = jnp.dot(x, self.params["Q_2"])
         return Q_1, Q_2
 
 class DistributionalCriticNetwork(BaseCriticNetwork):
@@ -102,7 +106,7 @@ class DistributionalCriticNetwork(BaseCriticNetwork):
     support_range: range of the support [tuple]
 
     returns:
-    dist: probability distribution over the points [tensor]
+    dist: probability distribution over the points [jnp.array]
 
     notes:
     support is a tensor showing the bins of the distribution (e.g. [-5, -4, -3, ..., 3, 4, 5])
@@ -110,19 +114,30 @@ class DistributionalCriticNetwork(BaseCriticNetwork):
     The bins represent the value of the Q-function at that point.
     '''
     def __init__(self, state_dim, action_dim, hidden_dim=256, num_points=51, support_range=(-10, 10)):
-        super(DistributionalCriticNetwork, self).__init__(state_dim, action_dim, hidden_dim)
+        super().__init__(state_dim, action_dim, hidden_dim)
         self.num_points = num_points
         self.support_range = support_range
         self.delta_z = (support_range[1] - support_range[0]) / (num_points - 1)
-        self.support = torch.linspace(support_range[0], support_range[1], num_points)
-        self.distributional_output = nn.Linear(hidden_dim, num_points)
+        self.support = jnp.linspace(support_range[0], support_range[1], num_points)
+        self.params.update({
+            "distributional_output": jax.random.normal(jax.random.PRNGKey(4), (hidden_dim, num_points))
+        })
 
     def forward(self, state, action):
-        x = self.forward_base(state, action) # Basic critic pass
-        distributional_output = F.softmax(self.distributional_output(x), dim=1) # Convert to probability distributions
-        dist = distributional_output.clamp(min=1e-3) # Clamped to prevent numerical instabilities
-        return dist # Probability distribution over the points
-    
+        '''
+        This function calculates the probability distribution of the critic.
+        params:
+        state: state input [jnp.array]
+        action: action input [jnp.array]
+
+        returns:
+        dist: probability distribution over the points [jnp.array]
+        '''
+        x = self.forward_base(state, action)
+        distributional_output = jax.nn.softmax(jnp.dot(x, self.params["distributional_output"]), axis=-1)
+        dist = jnp.clip(distributional_output, a_min=1e-3)
+        return dist
+
 class DoubleDistributionalCriticNetwork(BaseCriticNetwork):
     '''
     This class implements a double distributional critic network.
@@ -134,22 +149,39 @@ class DoubleDistributionalCriticNetwork(BaseCriticNetwork):
     support_range: range of the support [tuple]
 
     returns:
-    dist_1: probability distribution of the first critic [tensor]
-    dist_2: probability distribution of the second critic [tensor]
+    dist_1: probability distribution of the first critic [jnp.array]
+    dist_2: probability distribution of the second critic [jnp.array]
     '''
     def __init__(self, state_dim, action_dim, hidden_dim=256, num_points=51, support_range=(-10, 10)):
-        super(DoubleDistributionalCriticNetwork, self).__init__(state_dim, action_dim, hidden_dim)
+        super().__init__(state_dim, action_dim, hidden_dim)
         self.num_points = num_points
         self.support_range = support_range
         self.delta_z = (support_range[1] - support_range[0]) / (num_points - 1)
-        self.support = torch.linspace(support_range[0], support_range[1], num_points)
-        self.distributional_output_1 = nn.Linear(hidden_dim, num_points)
-        self.distributional_output_2 = nn.Linear(hidden_dim, num_points)
+        self.support = jnp.linspace(support_range[0], support_range[1], num_points)
+        self.params.update({
+            "distributional_output_1": jax.random.normal(jax.random.PRNGKey(5), (hidden_dim, num_points)),
+            "distributional_output_2": jax.random.normal(jax.random.PRNGKey(6), (hidden_dim, num_points))
+        })
 
     def forward(self, state, action):
-        x = self.forward_base(state, action) # Basic critic pass
-        dist_1 = F.softmax(self.distributional_output_1(x), dim=1) # Convert to probability distributions
-        dist_2 = F.softmax(self.distributional_output_2(x), dim=1) # Convert to probability distributions
-        dist_1 = dist_1.clamp(min=1e-3) # Clamped to prevent numerical instabilities
-        dist_2 = dist_2.clamp(min=1e-3) # Clamped to prevent numerical instabilities
+        '''
+        This function calculates the probability distribution of the critic.
+        params:
+        state: state input [jnp.array]
+        action: action input [jnp.array]
+
+        returns:
+        dist_1: probability distribution of the first critic [jnp.array]
+        dist_2: probability distribution of the second critic [jnp.array]
+
+        notes:
+        The probability distribution is calculated using the jax.nn.softmax function.
+        Also, clipping is done to avoid numerical instability.
+
+        '''
+        x = self.forward_base(state, action)
+        dist_1 = jax.nn.softmax(jnp.dot(x, self.params["distributional_output_1"]), axis=-1)
+        dist_2 = jax.nn.softmax(jnp.dot(x, self.params["distributional_output_2"]), axis=-1)
+        dist_1 = jnp.clip(dist_1, a_min=1e-3)
+        dist_2 = jnp.clip(dist_2, a_min=1e-3)
         return dist_1, dist_2
