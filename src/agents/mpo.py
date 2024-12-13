@@ -139,7 +139,7 @@ class MPOLearner:
         self.n_step = config['n_step']
         self.rng_key = jax.random.PRNGKey(config['seed'])
 
-        # Action ranges
+        # Action ranges: nice to have as (0, 1) so are normalised values
         self.action_min = config['action_min']
         self.action_max = config['action_max']
 
@@ -224,14 +224,12 @@ class MPOLearner:
         )
         return target_q_values, critic_loss
     
-
-
     def e_step(
-        self,
-        states: jnp.ndarray,
-        batch_size: int,
-        action_sample_size: int
-    ) -> Tuple[float, jnp.ndarray, jnp.ndarray]:
+                self,
+                states: jnp.ndarray,
+                batch_size: int,
+                action_sample_size: int
+                ) -> Tuple[float, jnp.ndarray, jnp.ndarray]:
         '''
         Perform the E-step of MPO.
 
@@ -244,24 +242,34 @@ class MPOLearner:
         temp: Updated temperature parameter [float]
         weights: Weights for the sampled actions [jnp.ndarray]
         sampled_actions: Sampled actions for each state [jnp.ndarray]
+
+        REFERENCE: https://github.com/henry-prior/jax-rl/blob/master/jax_rl/MPO.py
+
         '''
         # Sample actions from the policy network
         mean, log_std = self.policy_network.forward(states)
         std = jnp.exp(log_std)
         sampled_actions = mean + std * jax.random.normal(self.rng, (batch_size, action_sample_size, self.action_dim))
-        sampled_actions = jnp.clip(sampled_actions, -self.max_action, self.max_action)
+        sampled_actions = jnp.clip(sampled_actions, self.min_action, self.max_action)
 
         # Evaluate Q-values for sampled actions
         q_values = []
         for i in range(action_sample_size):
-            q_value = self.critic_network.forward(states, sampled_actions[:, i, :])
-            if isinstance(q_value, tuple):  # Double critic
-                q_value = jnp.minimum(q_value[0], q_value[1])
+            q_value = self.critic_network.evaluate_q_value(states, sampled_actions[:, i, :])
             q_values.append(q_value)
         q_values = jnp.stack(q_values, axis=1)  # Shape: (batch_size, action_sample_size)
 
-        # Minimize the dual function to update temperature
-        def dual(temp):
+        # Define the dual function for temperature optimization
+        def dual(temp: float) -> float:
+            '''
+            Computes the dual function for temperature optimization.
+
+            params:
+            temp: Current temperature parameter [float]
+
+            returns:
+            dual_value: Value of the dual function [float]
+            '''
             softmax_weights = jax.nn.softmax(q_values / temp, axis=1)
             dual_value = temp * self.eps_eta + temp * jnp.mean(
                 jax.scipy.special.logsumexp(q_values / temp, axis=1) - jnp.log(action_sample_size)
@@ -270,21 +278,33 @@ class MPOLearner:
 
         # Compute the gradient of the dual function
         dual_grad = jax.grad(dual)
+
         # Perform optimization (e.g., using SLSQP as in your example)
         bounds = [(1e-6, None)]  # Avoid numerical instability
-        res = scipy.minimize(lambda x: dual(x), self.temp, jac=lambda x: dual_grad(x), bounds=bounds, method="SLSQP")
+        res = scipy.optimize.minimize(
+            fun=lambda x: dual(x), 
+            x0=self.temp, 
+            jac=lambda x: dual_grad(x), 
+            bounds=bounds, 
+            method="SLSQP"
+        )
+
+        # Update the temperature parameter
         self.temp = jax.lax.stop_gradient(res.x)
 
         # Compute weights for the sampled actions
         weights = jax.nn.softmax(q_values / self.temp, axis=1)
-        weights = jnp.expand_dims(weights, axis=-1)  # Add an extra dimension for broadcasting
+        weights = jnp.expand_dims(weights, axis=-1)  
 
         # Stop gradient for weights and temperature
         weights = jax.lax.stop_gradient(weights)
         self.temp = jax.lax.stop_gradient(self.temp)
 
-        return self.temp, weights, sampled_actions
+        return weights, sampled_actions
 
+
+
+        
     def update(self, batch_size):
         '''
         Update the policy and critic networks.

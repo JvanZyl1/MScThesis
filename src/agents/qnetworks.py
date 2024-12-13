@@ -121,12 +121,28 @@ class BaseCriticNetwork(CriticNetwork):
         td_target = reward + gamma * not_done * next_q_value
         return td_target
     
+    def evaluate_q_value(self,
+                        states: jnp.ndarray,
+                        actions: jnp.ndarray) -> jnp.ndarray:
+        '''
+        This function evaluates the Q-value for the given state-action pair.
+
+        params:
+        states: States [jnp.ndarray]
+        actions: Actions [jnp.ndarray]
+
+        returns:
+        q_value: Q-value [jnp.ndarray]
+        '''
+        q_value = self.forward(states, actions)
+        return q_value
+    
     def compute_loss(self,
                     states: jnp.ndarray,
                     actions: jnp.ndarray,
                     target_q_value: jnp.ndarray) -> float:
         # Get current Q-values from the critic for the sampled state-action pairs
-        q_value = self.critic_network.forward(states, actions)
+        q_value = self.forward(states, actions)
 
         # Compute the critic loss (MSE between current Q-values and the TD target)
         critic_loss = jnp.mean((q_value - target_q_value) ** 2)
@@ -179,11 +195,18 @@ class DoubleCriticNetwork(CriticNetwork):
                     actions: jnp.ndarray,
                     target_q_value: jnp.ndarray) -> float:
         # Get current Q-values from the critic for the sampled state-action pairs
-        Q_1, Q_2 = self.critic_network.forward(states, actions)
+        Q_1, Q_2 = self.forward(states, actions)
 
         # Compute the critic loss (MSE between current Q-values and the TD target)
         critic_loss = jnp.mean((Q_1 - target_q_value) ** 2) + jnp.mean((Q_2 - target_q_value) ** 2)
         return critic_loss
+    
+    def evaluate_q_value(self,
+                        states: jnp.ndarray,
+                        actions: jnp.ndarray) -> jnp.ndarray:
+        Q_1, Q_2 = self.forward(states, actions)
+        q_value = jnp.minimum(Q_1, Q_2)
+        return q_value
 
 class DistributionalCriticNetwork(CriticNetwork):
     '''
@@ -313,6 +336,13 @@ class DistributionalCriticNetwork(CriticNetwork):
         # Return the mean loss across the batch
         return jnp.mean(critic_loss)
 
+    def evaluate_q_value(self,
+                        states: jnp.ndarray,
+                        actions: jnp.ndarray) -> jnp.ndarray:
+        # Scalar approximation of the Q-value
+        dist = self.forward(states, actions)
+        q_value = jnp.sum(dist * self.support, axis=-1)
+        return q_value
 
 
 class DoubleDistributionalCriticNetwork(CriticNetwork):
@@ -430,3 +460,12 @@ class DoubleDistributionalCriticNetwork(CriticNetwork):
         
         # Return the mean loss across the batch
         return jnp.mean(critic_loss)
+    
+    def evaluate_q_value(self,
+                        states: jnp.ndarray,
+                        actions: jnp.ndarray) -> jnp.ndarray:
+        dist_1, dist_2 = self.forward(states, actions)
+        q_value_1 = jnp.sum(dist_1 * self.support, axis=-1)
+        q_value_2 = jnp.sum(dist_2 * self.support, axis=-1)
+        q_value = jnp.minimum(q_value_1, q_value_2)
+        return q_value
