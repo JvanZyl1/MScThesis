@@ -186,37 +186,12 @@ class MPOLearner:
         - Normal critic
         '''
         # 1. Compute the target TD
+        next_action = self.policy(next_state)  # Compute the next action using the policy.
         
 
-        # Double: Q(s,a) = r + \gamma * min(Q_1(s', a'), Q_2(s', a'))
-        def compute_td_target_double(reward, next_state, not_done, target_critic, gamma):
-            next_action = target_critic.policy(next_state)  # Compute next action
-            next_q1, next_q2 = target_critic.forward(next_state, next_action)
-            next_q_min = jnp.minimum(next_q1, next_q2)
-            td_target = reward + gamma * not_done * next_q_min
-            return td_target
+        
 
-        # Distributional: Q_Z(s, a) = r + \gamma * (1 - done) * z_i
-        def compute_td_target_distributional(reward, next_state, not_done, target_critic, gamma):
-            next_action = target_critic.policy(next_state)  # Compute next action
-            next_dist = target_critic.forward(next_state, next_action)  # Distributional Q-values
-
-            # Extract support and delta_z from critic
-            support = target_critic.support
-            delta_z = target_critic.delta_z
-
-            # Compute projected distribution
-            projected_dist = jnp.zeros_like(next_dist)
-            for i, z_i in enumerate(support):
-                # i = 0, 1, ..., num_points
-                # z_i = z_0, z_1, ..., z_{num_points} = support; support is a tensor showing the bins of the distribution
-                tz = reward + gamma * not_done * z_i
-                tz = jnp.clip(tz, support[0], support[-1])  # Clamp to the range of support
-                b = (tz - support[0]) / delta_z  # Map to bin
-                lower, upper = jnp.floor(b).astype(int), jnp.ceil(b).astype(int)
-                projected_dist[:, lower] += next_dist[:, i] * (upper - b)
-                projected_dist[:, upper] += next_dist[:, i] * (b - lower)
-            return projected_dist
+        
 
         # Double Distributional: Q_Z(s, a) = r + \gamma * (1 - done) * min(z_1', z_2')
         def compute_td_target_double_distributional(reward, next_state, not_done, target_critic, gamma, support, delta_z):

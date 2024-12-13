@@ -75,20 +75,29 @@ class BaseCriticNetwork(CriticNetwork):
     No fancy stuff
     '''
     def __init__(self, state_dim, action_dim, hidden_dim=256):
-        
+        super().__init__(state_dim, action_dim, hidden_dim)
+        self.params.update({
+            "Q": jax.random.normal(jax.random.PRNGKey(2), (hidden_dim, 1))
+        })
+
+    def forward(self, state, action):
+        x = self.forward_base(state, action)
+        Q = jnp.dot(x, self.params["Q"])
+        return Q        
     
-    def compute_td_target(reward, next_state, not_done, target_critic, gamma):
+    def compute_td_target(self, reward, next_state, next_action, not_done, gamma):
         # Basic:  Q(s, a) = r + \gamma * Q(s', a')
         '''
+        This function calculates the TD target for the critic.
+
         params:
         reward: Reward [jnp.array]
         next_state: Next state [jnp.array]
+        next_action: Next action [jnp.array]
         not_done: Not done flag [jnp.array]
-        target_critic: Target critic network [CriticNetwork]
         gamma: Discount factor [float]
         '''
-        next_action = target_critic.policy(next_state)
-        next_q_value = target_critic.forward(next_state, next_action)
+        next_q_value = self.forward(next_state, next_action)
         td_target = reward + gamma * not_done * next_q_value
         return td_target
 
@@ -116,6 +125,13 @@ class DoubleCriticNetwork(CriticNetwork):
         Q_1 = jnp.dot(x, self.params["Q_1"])
         Q_2 = jnp.dot(x, self.params["Q_2"])
         return Q_1, Q_2
+    
+    # Double: Q(s,a) = r + \gamma * min(Q_1(s', a'), Q_2(s', a'))
+    def compute_td_target(self, reward, next_state, next_action, not_done, gamma):
+        next_q1, next_q2 = self.forward(next_state, next_action)
+        next_q_min = jnp.minimum(next_q1, next_q2)
+        td_target = reward + gamma * not_done * next_q_min
+        return td_target
 
 class DistributionalCriticNetwork(CriticNetwork):
     '''
@@ -159,6 +175,53 @@ class DistributionalCriticNetwork(CriticNetwork):
         distributional_output = jax.nn.softmax(jnp.dot(x, self.params["distributional_output"]), axis=-1)
         dist = jnp.clip(distributional_output, a_min=1e-3)
         return dist
+    
+    # Distributional: Q_Z(s, a) = r + \gamma * (1 - done) * z_i
+    def compute_td_target(self, reward, next_state, next_action, not_done, gamma):
+        '''
+        Compute the TD target for a distributional critic.
+
+        params:
+        reward: Reward from the sampled transition [jnp.array]
+        next_state: Next state from the sampled transition [jnp.array]
+        next_action: Next action from the sampled transition [jnp.array]
+        not_done: Not done flags indicating whether episodes are ongoing [jnp.array]
+        gamma: Discount factor for future rewards [float]
+
+        returns:
+        projected_dist: Projected probability distribution for the TD target [jnp.array]
+
+        steps:
+        - Compute the next action using the target policy.
+        - Get the distributional Q-values for the next state-action pair.
+        - Compute a "projected" distribution that aligns with the critic's fixed support.
+        '''
+        # Get the distributional Q-values.
+        next_dist = self.forward(next_state, next_action)  
+
+        # Initialize the projected distribution with zeros.
+        projected_dist = jnp.zeros_like(next_dist)
+
+        # Iterate over each point in the fixed support of the distribution.
+        for i, z_i in enumerate(self.support):
+            # Compute the target value (tz) for each point in the support.
+            tz = reward + gamma * not_done * z_i
+
+            # Clamp the target value to ensure it stays within the range of the support.
+            tz = jnp.clip(tz, self.support[0], self.support[-1])
+
+            # Map the target value (tz) to the corresponding bin in the fixed support.
+            b = (tz - self.support[0]) / self.delta_z
+
+            # Determine the indices of the lower and upper bins.
+            lower, upper = jnp.floor(b).astype(int), jnp.ceil(b).astype(int)
+
+            # Distribute the probability mass across the lower and upper bins proportionally.
+            projected_dist[:, lower] += next_dist[:, i] * (upper - b)
+            projected_dist[:, upper] += next_dist[:, i] * (b - lower)
+
+        return projected_dist
+
 
 class DoubleDistributionalCriticNetwork(CriticNetwork):
     '''
@@ -207,3 +270,37 @@ class DoubleDistributionalCriticNetwork(CriticNetwork):
         dist_1 = jnp.clip(dist_1, a_min=1e-3)
         dist_2 = jnp.clip(dist_2, a_min=1e-3)
         return dist_1, dist_2
+
+    # Double Distributional: Q_Z(s, a) = r + \gamma * (1 - done) * min(z_1', z_2')
+    def compute_td_target(self, reward, next_state, next_action, not_done, gamma):
+        '''
+        Compute the TD target for a DOUBLE distributional critic.
+        '''
+        # Get the distributional Q-values.
+        next_dist_1, next_dist_2 = self.forward(next_state, next_action)  
+
+        # Minimum distribution
+        next_dist_min = jnp.minimum(next_dist_1, next_dist_2)
+
+        # Initialize the projected distribution with zeros.
+        projected_dist = jnp.zeros_like(next_dist_min)
+
+        # Iterate over each point in the fixed support of the distribution.
+        for i, z_i in enumerate(self.support):
+            # Compute the target value (tz) for each point in the support.
+            tz = reward + gamma * not_done * z_i
+
+            # Clamp the target value to ensure it stays within the range of the support.
+            tz = jnp.clip(tz, self.support[0], self.support[-1])
+
+            # Map the target value (tz) to the corresponding bin in the fixed support.
+            b = (tz - self.support[0]) / self.delta_z
+
+            # Determine the indices of the lower and upper bins.
+            lower, upper = jnp.floor(b).astype(int), jnp.ceil(b).astype(int)
+
+            # Distribute the probability mass across the lower and upper bins proportionally.
+            projected_dist[:, lower] += next_dist_min[:, i] * (upper - b)
+            projected_dist[:, upper] += next_dist_min[:, i] * (b - lower)
+
+        return projected_dist
