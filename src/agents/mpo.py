@@ -3,9 +3,16 @@ import jax
 import scipy
 from typing import Tuple
 
+from flax.core.frozen_dict import FrozenDict
+from flax import optim
+from functools import partial
+
 from src.agents.qnetworks import PolicyNetwork                                                                        # Actor network
 from src.agents.qnetworks import DistributionalCriticNetwork, DoubleCriticNetwork, DoubleDistributionalCriticNetwork, BaseCriticNetwork  # Critic networks
 from src.agents.buffers import ReplayBuffer, PrioritizedReplayBuffer                                                  # Replay buffer
+from src.utils.gaussian_likelihood import gaussian_likelihood                                                         # Gaussian likelihood
+from src.utils.kl_divergence import kl_divergence_multivariate_gaussian, mean_lagrange_step, std_lagrange_step        # KL divergence
+from src.utils.clip_gradients import clip_grads                                                                       # Gradient clipping
 
 class MPOLearner:
     '''
@@ -143,6 +150,10 @@ class MPOLearner:
         self.action_min = config['action_min']
         self.action_max = config['action_max']
 
+        # KL divergence constraints
+        self.kl_constraint_mean = config['kl_constraint_mean']
+        self.kl_constraint_std = config['kl_constraint_std']
+
     def select_action(self,
                       state: jnp.ndarray) -> jnp.ndarray:
         '''
@@ -247,8 +258,7 @@ class MPOLearner:
 
         '''
         # Sample actions from the policy network
-        mean, log_std = self.policy_network.forward(states)
-        std = jnp.exp(log_std)
+        mean, std = self.policy_network.forward(states)
         sampled_actions = mean + std * jax.random.normal(self.rng, (batch_size, action_sample_size, self.action_dim))
         sampled_actions = jnp.clip(sampled_actions, self.min_action, self.max_action)
 
@@ -270,7 +280,6 @@ class MPOLearner:
             returns:
             dual_value: Value of the dual function [float]
             '''
-            softmax_weights = jax.nn.softmax(q_values / temp, axis=1)
             dual_value = temp * self.eps_eta + temp * jnp.mean(
                 jax.scipy.special.logsumexp(q_values / temp, axis=1) - jnp.log(action_sample_size)
             )
@@ -301,8 +310,98 @@ class MPOLearner:
         self.temp = jax.lax.stop_gradient(self.temp)
 
         return weights, sampled_actions
+    
+    def actor_loss_fcn(self,
+                       states: jnp.ndarray,
+                       sampled_actions: jnp.ndarray,
+                       weights_sampled_actions: jnp.ndarray
+                       ) -> Tuple[float, Tuple]:
+        '''
+        align the parametric policy (neural network) with the non-parametric target policy (from the E-step)
+        while maintaining stability via KL divergence constraints
 
+        params:
+        states: Batch of states for the actor update [jnp.ndarray]
+        sampled_actions: Sampled actions for each state [jnp.ndarray]
+        weights_sampled_actions: Weights for the sampled actions [jnp.ndarray]
 
+        returns:
+        actor_loss: Loss of the actor network [float]
+        mu_lagrange_optimizer: Optimizer for the mean KL constraint [Tuple]
+        sig_lagrange_optimizer: Optimizer for the std KL constraint [Tuple]
+        '''
+        
+        # 1. Calculate the distribution of the actor network for the current policy
+        # Compute the current policy distribution
+        current_mean, current_std = self.policy_network.forward(states)  # Predict mean and std for actions
+        current_std = jnp.clip(current_std, 1e-6, None)  # Ensure numerical stability for standard deviation
+
+        # 2. Compute the target policy distribution (detached to prevent updates)
+        target_mean, target_std = self.target_policy_network.forward(states)  # Predict target mean and std
+        target_mean = jax.lax.stop_gradient(target_mean)        # Prevent gradients from flowing into target
+        target_std = jax.lax.stop_gradient(jnp.clip(target_std, 1e-6, None))  # Stop gradient for target std
+
+        # 3. Compute the actor loss via gaussian likelihood of the sampled actions
+        actor_log_prob = gaussian_likelihood(sampled_actions, target_mean, current_std) + gaussian_likelihood(sampled_actions, current_mean, target_std)
+
+        # 4. Compute the KL divergence between the target and current policy
+        KL_divergence_mean = kl_divergence_multivariate_gaussian(target_mean, target_std, current_mean, target_std).mean()
+        KL_divergence_std  = kl_divergence_multivariate_gaussian(target_mean, target_std, target_mean, current_std).mean()
+
+        # 4. Update Lagrange multipliers to enforce KL constraints
+        self.mean_lagrange_optimizer = mean_lagrange_step(
+            self.mean_lagrange_optimizer, self.kl_constraint_mean - jax.lax.stop_gradient(KL_divergence_mean)
+        )
+        self.std_lagrange_optimizer = std_lagrange_step(
+            self.std_lagrange_optimizer, self.kl_constraint_std - jax.lax.stop_gradient(KL_divergence_std)
+        )
+
+        # 5. Compute actor loss
+        actor_loss = -(actor_log_prob * weights_sampled_actions).sum(axis=1).mean()
+        actor_loss -= jax.lax.stop_gradient(self.mean_lagrange_optimizer.target) * (self.kl_constraint_mean - KL_divergence_mean)
+        actor_loss -= jax.lax.stop_gradient(self.std_lagrange_optimizer.target) * (self.kl_constraint_std - KL_divergence_std)
+
+        return actor_loss, (self.mean_lagrange_optimizer, self.std_lagrange_optimizer)
+    
+    def m_step(
+        self,
+        states: jnp.ndarray,
+        weights: jnp.ndarray,
+        sampled_actions: jnp.ndarray
+    ) -> None:
+        '''
+        Perform the M-step of MPO.
+
+        params:
+        states: Batch of states for the M-step [jnp.ndarray]
+        weights: Weights for the sampled actions [jnp.ndarray]
+        sampled_actions: Sampled actions for each state [jnp.ndarray]
+
+        REFERENCE: https://github.com/henry-prior/jax-rl/blob/master/jax_rl/MPO.py
+        '''
+        def actor_loss_fcn() -> Tuple[float, Tuple]:
+            # Compute actor loss and update Lagrange multipliers
+            actor_loss, (updated_mean_optimizer, updated_std_optimizer) = self.actor_loss_fcn(
+                states,
+                sampled_actions,
+                weights)
+            return actor_loss, (updated_mean_optimizer, updated_std_optimizer)
+
+        # Compute gradients of the actor loss w.r.t. the actor network parameters
+        grad_fn = jax.value_and_grad(actor_loss_fcn, has_aux=True)
+        (actor_loss, (self.mu_lagrange_optimizer, self.sig_lagrange_optimizer)), grads = grad_fn(
+            self.actor_optimizer.target,
+            self.mean_lagrange_optimizer,
+            self.std_lagrange_optimizer
+        )
+
+        # Clip gradients to avoid exploding gradients
+        clipped_grads = clip_grads(grads, 40.0)
+
+        # Apply gradient updates to the actor optimizer
+        self.actor_optimizer = self.actor_optimizer.apply_gradient(clipped_grads)
+
+        return actor_loss
 
         
     def update(self, batch_size):
@@ -321,35 +420,15 @@ class MPOLearner:
         weights, sampled_actions = self.e_step(states, target_q_values)
 
         # 3. Perform the M-step (Parametric policy update)
-        self.m_step(states, weights, sampled_actions)
+        actor_loss = self.m_step(states, weights, sampled_actions)
 
-        # 4. Update the temperature parameter
-        self.temperature_update()
+        # 4. Update the target networks
+        if self.config['target_networks']:
+            self.target_policy_network = self.target_policy_network.replace(
+                params=self.tau * self.policy_network.params + (1 - self.tau) * self.target_policy_network.params
+            )
+            self.target_critic_network = self.target_critic_network.replace(
+                params=self.tau * self.critic_network.params + (1 - self.tau) * self.target_critic_network.params
+            )
 
-
-
-   
-
-    def m_step(self, batch_size):
-        '''
-        NOT DONE
-        Perform an M-step of the MPO algorithm.
-        i.e. parametric policy update through minimisation of the KL divergence of the target and parametric policy netwrks,
-        using KL divergence constraints to stay within trust region
-        params:
-        '''
-
-
-
-
-    def temperature_update(self):
-        '''
-        NOT DONE
-        Update the temperature parameter.
-        '''
-
-    def actor_update(self):
-        '''
-        NOT DONE
-        Update the actor network.
-        '''
+        return critic_loss, actor_loss

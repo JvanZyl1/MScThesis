@@ -147,6 +147,20 @@ class BaseCriticNetwork(CriticNetwork):
         # Compute the critic loss (MSE between current Q-values and the TD target)
         critic_loss = jnp.mean((q_value - target_q_value) ** 2)
         return critic_loss
+    
+    def replace(self, params: dict) -> 'BaseCriticNetwork':
+        '''
+        Replace the parameters of the critic network.
+        
+        params:
+        params: New parameters to replace the current ones [dict].
+        
+        returns:
+        A new instance of BaseCriticNetwork with updated parameters.
+        '''
+        new_critic = BaseCriticNetwork(self.state_dim, self.action_dim, self.hidden_dim)
+        new_critic.params = params
+        return new_critic
 
 class DoubleCriticNetwork(CriticNetwork):
     '''
@@ -207,6 +221,11 @@ class DoubleCriticNetwork(CriticNetwork):
         Q_1, Q_2 = self.forward(states, actions)
         q_value = jnp.minimum(Q_1, Q_2)
         return q_value
+    
+    def replace(self, params: dict) -> 'DoubleCriticNetwork':
+        new_critic = DoubleCriticNetwork(self.state_dim, self.action_dim, self.hidden_dim)
+        new_critic.params = params
+        return new_critic
 
 class DistributionalCriticNetwork(CriticNetwork):
     '''
@@ -309,6 +328,8 @@ class DistributionalCriticNetwork(CriticNetwork):
 
         return projected_dist
     
+    
+    
     def compute_loss(self,
                     states: jnp.ndarray,
                     actions: jnp.ndarray,
@@ -344,6 +365,10 @@ class DistributionalCriticNetwork(CriticNetwork):
         q_value = jnp.sum(dist * self.support, axis=-1)
         return q_value
 
+    def replace(self, params: dict) -> 'DistributionalCriticNetwork':
+        new_critic = DistributionalCriticNetwork(self.state_dim, self.action_dim, self.hidden_dim)
+        new_critic.params = params
+        return new_critic
 
 class DoubleDistributionalCriticNetwork(CriticNetwork):
     '''
@@ -469,3 +494,8 @@ class DoubleDistributionalCriticNetwork(CriticNetwork):
         q_value_2 = jnp.sum(dist_2 * self.support, axis=-1)
         q_value = jnp.minimum(q_value_1, q_value_2)
         return q_value
+    
+    def replace(self, params: dict) -> 'DoubleDistributionalCriticNetwork':
+        new_critic = DoubleDistributionalCriticNetwork(self.state_dim, self.action_dim, self.hidden_dim)
+        new_critic.params = params
+        return new_critic
