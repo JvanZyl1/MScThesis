@@ -25,12 +25,12 @@ class PolicyNetwork:
         self.action_dim = action_dim
         self.hidden_dim = hidden_dim
         self.stochastic = stochastic
-        self.key = rng_key
+        self.key, subkey1, subkey2, subkey3, subkey4 = jax.random.split(rng_key, 5)
         self.params = {
-            "fc1": jax.random.normal(rng_key, (state_dim, hidden_dim)),
-            "fc2": jax.random.normal(rng_key, (hidden_dim, hidden_dim)),
-            "mean": jax.random.normal(rng_key, (hidden_dim, action_dim)),
-            "log_std": jax.random.normal(rng_key, (hidden_dim, action_dim))
+            "fc1": jax.random.normal(subkey1, (state_dim, hidden_dim)),
+            "fc2": jax.random.normal(subkey2, (hidden_dim, hidden_dim)),
+            "mean": jax.random.normal(subkey3, (hidden_dim, action_dim)),
+            "log_std": jax.random.normal(subkey4, (hidden_dim, action_dim))
         }
 
     def forward(self,
@@ -323,8 +323,8 @@ class DistributionalCriticNetwork(CriticNetwork):
             lower, upper = jnp.floor(b).astype(int), jnp.ceil(b).astype(int)
 
             # Distribute the probability mass across the lower and upper bins proportionally.
-            projected_dist[:, lower] += next_dist[:, i] * (upper - b)
-            projected_dist[:, upper] += next_dist[:, i] * (b - lower)
+            projected_dist = projected_dist.at[:, lower].add(next_dist[:, i] * (upper - b))
+            projected_dist = projected_dist.at[:, upper].add(next_dist[:, i] * (b - lower))
 
         return projected_dist
     
@@ -459,8 +459,8 @@ class DoubleDistributionalCriticNetwork(CriticNetwork):
             lower, upper = jnp.floor(b).astype(int), jnp.ceil(b).astype(int)
 
             # Distribute the probability mass across the lower and upper bins proportionally.
-            projected_dist[:, lower] += next_dist_min[:, i] * (upper - b)
-            projected_dist[:, upper] += next_dist_min[:, i] * (b - lower)
+            projected_dist = projected_dist.at[:, lower].add(next_dist_min[:, i] * (upper - b))
+            projected_dist = projected_dist.at[:, upper].add(next_dist_min[:, i] * (b - lower))
 
         return projected_dist
 

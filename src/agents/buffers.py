@@ -100,6 +100,12 @@ class ReplayBuffer:
     def __len__(self) -> int:
         return len(self.buffer)
 
+
+import jax
+import jax.numpy as jnp
+from collections import deque
+from typing import Tuple
+
 class PrioritizedReplayBuffer:
     '''
     This class implements a prioritized replay buffer.
@@ -108,6 +114,8 @@ class PrioritizedReplayBuffer:
     n_step: n-step return [int]
     gamma: discount factor [float]
     alpha: alpha value for prioritized replay buffer [float]
+    beta: initial beta value for importance sampling [float]
+    beta_decay: decay rate for beta value [float]
 
     returns:
     states: states sampled from the replay buffer [jnp.ndarray]
@@ -119,16 +127,20 @@ class PrioritizedReplayBuffer:
     weights: importance weights of the samples [jnp.ndarray]
     '''
     def __init__(self,
-                    capacity: int,
-                    n_step: int = 1,
-                    gamma: float = 0.99,
-                    alpha: float = 0.6):
+                 capacity: int,
+                 n_step: int = 1,
+                 gamma: float = 0.99,
+                 alpha: float = 0.6,
+                 beta: float = 0.4,
+                 beta_decay: float = 0.001):
         self.capacity = capacity
         self.buffer = []
         self.priorities = jnp.zeros((capacity,), dtype=jnp.float32)
         self.n_step_buffer = deque(maxlen=n_step) if n_step > 1 else None
         self.pos = 0
         self.alpha = alpha
+        self.beta = beta
+        self.beta_decay = beta_decay
         self.n_step = n_step
         self.gamma = gamma
 
@@ -185,8 +197,8 @@ class PrioritizedReplayBuffer:
         return reward, next_state, done
 
     def update_priorities(self,
-                            indices: list,
-                            priorities: jnp.ndarray):
+                          indices: list,
+                          priorities: jnp.ndarray):
         '''
         This function updates the priorities of the samples.
         params:
@@ -196,14 +208,12 @@ class PrioritizedReplayBuffer:
         self.priorities = self.priorities.at[indices].set(priorities)
 
     def sample(self,
-                batch_size: int,
-                beta: float,
-                rng_key: jax.random.PRNGKey) -> Tuple[jnp.ndarray]:
+               batch_size: int,
+               rng_key: jax.random.PRNGKey) -> Tuple[jnp.ndarray]:
         '''
         This function samples a batch from the replay buffer.
         params:
         batch_size: size of the batch [int]
-        beta: beta value for prioritized replay buffer [float]
         rng_key: key for random number generation [jax.random.PRNGKey]
 
         returns:
@@ -227,6 +237,9 @@ class PrioritizedReplayBuffer:
         The probability of the sample is calculated as:
         P(i) = (p(i) ** alpha) / sum(p(i) ** alpha)
         '''
+        if len(self.buffer) < batch_size:
+            raise ValueError("Not enough samples in the buffer to sample a batch")
+
         if len(self.buffer) == self.capacity:
             priorities = self.priorities
         else:
@@ -236,8 +249,11 @@ class PrioritizedReplayBuffer:
         indices = jax.random.choice(rng_key, len(self.buffer), shape=(batch_size,), p=probabilities)
         samples = [self.buffer[idx] for idx in indices]
 
-        weights = (probabilities[indices] * len(self.buffer)) ** (-beta)
+        weights = (probabilities[indices] * len(self.buffer)) ** (-self.beta)
         weights /= jnp.max(weights)
+
+        # Update beta with decay
+        self.beta = min(1.0, self.beta + self.beta_decay)
 
         states, actions, rewards, next_states, dones = zip(*samples)
         return (
