@@ -85,21 +85,29 @@ class BaseCriticNetwork(CriticNetwork):
         Q = jnp.dot(x, self.params["Q"])
         return Q        
     
-    def compute_td_target(self, reward, next_state, next_action, not_done, gamma):
+    def compute_td_target(self, reward, next_states, next_actions, not_done, gamma):
         # Basic:  Q(s, a) = r + \gamma * Q(s', a')
         '''
         This function calculates the TD target for the critic.
 
         params:
         reward: Reward [jnp.array]
-        next_state: Next state [jnp.array]
-        next_action: Next action [jnp.array]
+        next_states: Next state [jnp.array]
+        next_actions: Next action [jnp.array]
         not_done: Not done flag [jnp.array]
         gamma: Discount factor [float]
         '''
-        next_q_value = self.forward(next_state, next_action)
+        next_q_value = self.forward(next_states, next_actions)
         td_target = reward + gamma * not_done * next_q_value
         return td_target
+    
+    def compute_loss(self, states, actions, target_q_value):
+        # Get current Q-values from the critic for the sampled state-action pairs
+        q_value = self.critic_network.forward(states, actions)
+
+        # Compute the critic loss (MSE between current Q-values and the TD target)
+        critic_loss = jnp.mean((q_value - target_q_value) ** 2)
+        return critic_loss
 
 class DoubleCriticNetwork(CriticNetwork):
     '''
@@ -127,11 +135,19 @@ class DoubleCriticNetwork(CriticNetwork):
         return Q_1, Q_2
     
     # Double: Q(s,a) = r + \gamma * min(Q_1(s', a'), Q_2(s', a'))
-    def compute_td_target(self, reward, next_state, next_action, not_done, gamma):
-        next_q1, next_q2 = self.forward(next_state, next_action)
+    def compute_td_target(self, reward, next_states, next_actions, not_done, gamma):
+        next_q1, next_q2 = self.forward(next_states, next_actions)
         next_q_min = jnp.minimum(next_q1, next_q2)
         td_target = reward + gamma * not_done * next_q_min
         return td_target
+    
+    def compute_loss(self, states, actions, target_q_value):
+        # Get current Q-values from the critic for the sampled state-action pairs
+        Q_1, Q_2 = self.critic_network.forward(states, actions)
+
+        # Compute the critic loss (MSE between current Q-values and the TD target)
+        critic_loss = jnp.mean((Q_1 - target_q_value) ** 2) + jnp.mean((Q_2 - target_q_value) ** 2)
+        return critic_loss
 
 class DistributionalCriticNetwork(CriticNetwork):
     '''
@@ -177,14 +193,14 @@ class DistributionalCriticNetwork(CriticNetwork):
         return dist
     
     # Distributional: Q_Z(s, a) = r + \gamma * (1 - done) * z_i
-    def compute_td_target(self, reward, next_state, next_action, not_done, gamma):
+    def compute_td_target(self, reward, next_states, next_actions, not_done, gamma):
         '''
         Compute the TD target for a distributional critic.
 
         params:
         reward: Reward from the sampled transition [jnp.array]
-        next_state: Next state from the sampled transition [jnp.array]
-        next_action: Next action from the sampled transition [jnp.array]
+        next_states: Next state from the sampled transition [jnp.array]
+        next_actions: Next action from the sampled transition [jnp.array]
         not_done: Not done flags indicating whether episodes are ongoing [jnp.array]
         gamma: Discount factor for future rewards [float]
 
@@ -197,7 +213,7 @@ class DistributionalCriticNetwork(CriticNetwork):
         - Compute a "projected" distribution that aligns with the critic's fixed support.
         '''
         # Get the distributional Q-values.
-        next_dist = self.forward(next_state, next_action)  
+        next_dist = self.forward(next_states, next_actions)  
 
         # Initialize the projected distribution with zeros.
         projected_dist = jnp.zeros_like(next_dist)
@@ -221,6 +237,31 @@ class DistributionalCriticNetwork(CriticNetwork):
             projected_dist[:, upper] += next_dist[:, i] * (b - lower)
 
         return projected_dist
+    
+    def compute_loss(self, states, actions, target_distribution):
+        '''
+        Compute the loss for a distributional critic.
+        params:
+        states: States from the sampled transitions [jnp.array]
+        actions: Actions from the sampled transitions [jnp.array]
+        target_distribution: Target probability distribution [jnp.array]
+
+        returns:
+        critic_loss: Loss value for the distributional critic [float]
+        '''
+        # Get the predicted distributional Q-values for the current state-action pairs
+        predicted_distribution = self.forward(states, actions)
+
+        # Ensure numerical stability by adding a small epsilon to avoid log(0)
+        epsilon = 1e-6
+        predicted_distribution = jnp.clip(predicted_distribution, a_min=epsilon, a_max=1.0)
+
+        # Compute the KL divergence between the target and predicted distributions
+        critic_loss = jnp.sum(target_distribution * jnp.log(target_distribution / predicted_distribution), axis=-1)
+        
+        # Return the mean loss across the batch
+        return jnp.mean(critic_loss)
+
 
 
 class DoubleDistributionalCriticNetwork(CriticNetwork):
@@ -272,12 +313,12 @@ class DoubleDistributionalCriticNetwork(CriticNetwork):
         return dist_1, dist_2
 
     # Double Distributional: Q_Z(s, a) = r + \gamma * (1 - done) * min(z_1', z_2')
-    def compute_td_target(self, reward, next_state, next_action, not_done, gamma):
+    def compute_td_target(self, reward, next_states, next_actions, not_done, gamma):
         '''
         Compute the TD target for a DOUBLE distributional critic.
         '''
         # Get the distributional Q-values.
-        next_dist_1, next_dist_2 = self.forward(next_state, next_action)  
+        next_dist_1, next_dist_2 = self.forward(next_states, next_actions)  
 
         # Minimum distribution
         next_dist_min = jnp.minimum(next_dist_1, next_dist_2)
@@ -304,3 +345,22 @@ class DoubleDistributionalCriticNetwork(CriticNetwork):
             projected_dist[:, upper] += next_dist_min[:, i] * (b - lower)
 
         return projected_dist
+
+    def compute_loss(self, states, actions, target_distribution):
+        '''
+        Compute the loss for a double distributional critic.
+        '''
+        # Get the predicted distributional Q-values for the current state-action pairs
+        predicted_distribution_1, predicted_distribution_2 = self.forward(states, actions)
+
+        # Ensure numerical stability by adding a small epsilon to avoid log(0)
+        epsilon = 1e-6
+        predicted_distribution_1 = jnp.clip(predicted_distribution_1, a_min=epsilon, a_max=1.0)
+        predicted_distribution_2 = jnp.clip(predicted_distribution_2, a_min=epsilon, a_max=1.0)
+
+        # Compute the KL divergence between the target and predicted distributions
+        critic_loss = jnp.sum(target_distribution * jnp.log(target_distribution / predicted_distribution_1), axis=-1) + \
+                      jnp.sum(target_distribution * jnp.log(target_distribution / predicted_distribution_2), axis=-1)
+        
+        # Return the mean loss across the batch
+        return jnp.mean(critic_loss)

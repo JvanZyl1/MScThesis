@@ -186,41 +186,26 @@ class MPOLearner:
         - Normal critic
         '''
         # 1. Compute the target TD
-        next_action = self.policy(next_state)  # Compute the next action using the policy.
-        
+        next_actions = self.policy(next_states)  # Compute the next action using the policy.
+        # Compute target TD
 
-        
+        # Compute the target TD using the double critic's compute_td_target method
+        target_q_values = self.critic_network.compute_td_target(
+            rewards, next_states, next_actions, 1 - dones, self.gamma
+        ) # or for distributional critics finds the target distribution
 
-        
+        critic_loss = self.critic_network.loss(states, actions, target_q_values)
 
-        # Double Distributional: Q_Z(s, a) = r + \gamma * (1 - done) * min(z_1', z_2')
-        def compute_td_target_double_distributional(reward, next_state, not_done, target_critic, gamma, support, delta_z):
-            next_action = target_critic.policy(next_state)  # Compute next action
-            next_dist1, next_dist2 = target_critic.forward(next_state, next_action)  # Two distributions
+        # Perform a gradient step to minimize the critic loss
+        # Compute the gradient of the critic loss w.r.t. the critic network parameters
+        grad = jax.grad(lambda params: critic_loss)(self.critic_network.params)
+        # Update the critic network parameters using the gradient
+        # lambda function updates via SGD: param - lr * gradient
 
-            # Minimum distribution
-            next_dist_min = jnp.minimum(next_dist1, next_dist2)
-
-            # Compute projected distribution
-            projected_dist = jnp.zeros_like(next_dist_min)
-            for i, z_i in enumerate(support):
-                tz = reward + gamma * not_done * z_i
-                tz = jnp.clip(tz, support[0], support[-1])  # Clamp to the range of support
-                b = (tz - support[0]) / delta_z  # Map to bin
-                lower, upper = jnp.floor(b).astype(int), jnp.ceil(b).astype(int)
-                projected_dist[:, lower] += next_dist_min[:, i] * (upper - b)
-                projected_dist[:, upper] += next_dist_min[:, i] * (b - lower)
-            return projected_dist
-
-        # Compute the target Q-values
-
-
-        # 2. Compute the critic loss
-
-
-        
-
-        return target_q_values
+        self.critic_network.params = jax.tree_util.tree_map(
+            lambda param, gradient: param - self.critic_lr * gradient, self.critic_network.params, grad
+        )
+        return target_q_values, critic_loss
 
     def update(self, batch_size):
         '''
