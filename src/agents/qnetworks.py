@@ -1,4 +1,5 @@
-import jax.numpy as jnpm
+import jax.numpy as jnp
+import jax
 
 class PolicyNetwork:
     '''
@@ -43,14 +44,13 @@ class PolicyNetwork:
         else:
             return mean
 
-class BaseCriticNetwork:
+class CriticNetwork:
     '''
-    This class represents the base critic network.
+    This class represents the critic network, to be used by others
     params:
     state_dim: dimension of the state space [int]
     action_dim: dimension of the action space [int]
     hidden_dim: dimension of the hidden layers [int]
-    action_dim_size_output: [bool] - determines whether complete critic or has other additional output
 
     returns:
     x: output of the critic network [jnp.array]
@@ -69,8 +69,30 @@ class BaseCriticNetwork:
         x = jax.nn.relu(jnp.dot(x, self.params["fc1"]))
         x = jax.nn.relu(jnp.dot(x, self.params["fc2"]))
         return x
+    
+class BaseCriticNetwork(CriticNetwork):
+    '''
+    No fancy stuff
+    '''
+    def __init__(self, state_dim, action_dim, hidden_dim=256):
+        
+    
+    def compute_td_target(reward, next_state, not_done, target_critic, gamma):
+        # Basic:  Q(s, a) = r + \gamma * Q(s', a')
+        '''
+        params:
+        reward: Reward [jnp.array]
+        next_state: Next state [jnp.array]
+        not_done: Not done flag [jnp.array]
+        target_critic: Target critic network [CriticNetwork]
+        gamma: Discount factor [float]
+        '''
+        next_action = target_critic.policy(next_state)
+        next_q_value = target_critic.forward(next_state, next_action)
+        td_target = reward + gamma * not_done * next_q_value
+        return td_target
 
-class DoubleCriticNetwork(BaseCriticNetwork):
+class DoubleCriticNetwork(CriticNetwork):
     '''
     This class implements a double critic network.
     params:
@@ -95,7 +117,7 @@ class DoubleCriticNetwork(BaseCriticNetwork):
         Q_2 = jnp.dot(x, self.params["Q_2"])
         return Q_1, Q_2
 
-class DistributionalCriticNetwork(BaseCriticNetwork):
+class DistributionalCriticNetwork(CriticNetwork):
     '''
     This class implements a distributional critic network.
     params:
@@ -138,7 +160,7 @@ class DistributionalCriticNetwork(BaseCriticNetwork):
         dist = jnp.clip(distributional_output, a_min=1e-3)
         return dist
 
-class DoubleDistributionalCriticNetwork(BaseCriticNetwork):
+class DoubleDistributionalCriticNetwork(CriticNetwork):
     '''
     This class implements a double distributional critic network.
     params:
