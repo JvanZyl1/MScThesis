@@ -1,5 +1,6 @@
 import jax.numpy as jnp
 import jax
+from typing import Tuple
 
 class PolicyNetwork:
     '''
@@ -11,15 +12,15 @@ class PolicyNetwork:
     stochastic: whether the policy is stochastic or deterministic [bool]
 
     returns:
-    mean: mean of the action distribution [jnp.array]
-    std: standard deviation of the action distribution [jnp.array]
+    mean: mean of the action distribution [jnp.ndarray]
+    std: standard deviation of the action distribution [jnp.ndarray]
     '''
     def __init__(self,
-                 state_dim,
-                 action_dim,
-                 hidden_dim=256,
-                 stochastic=True,
-                 rng_key=None):
+                 state_dim: int,
+                 action_dim: int,
+                 hidden_dim: int=256,
+                 stochastic: bool=True,
+                 rng_key: jax.random.PRNGKey=jax.random.PRNGKey(0)):
         self.state_dim = state_dim
         self.action_dim = action_dim
         self.hidden_dim = hidden_dim
@@ -32,7 +33,8 @@ class PolicyNetwork:
             "log_std": jax.random.normal(rng_key, (hidden_dim, action_dim))
         }
 
-    def forward(self, state):
+    def forward(self,
+                state: jnp.ndarray) -> jnp.ndarray:
         x = jax.nn.relu(jnp.dot(state, self.params["fc1"]))
         x = jax.nn.relu(jnp.dot(x, self.params["fc2"]))
         mean = jnp.dot(x, self.params["mean"])
@@ -53,9 +55,12 @@ class CriticNetwork:
     hidden_dim: dimension of the hidden layers [int]
 
     returns:
-    x: output of the critic network [jnp.array]
+    x: output of the critic network [jnp.ndarray]
     '''
-    def __init__(self, state_dim, action_dim, hidden_dim=256):
+    def __init__(self,
+                state_dim: int,
+                action_dim: int,
+                hidden_dim: int=256):
         self.state_dim = state_dim
         self.action_dim = action_dim
         self.hidden_dim = hidden_dim
@@ -64,7 +69,9 @@ class CriticNetwork:
             "fc2": jax.random.normal(jax.random.PRNGKey(1), (hidden_dim, hidden_dim))
         }
 
-    def forward_base(self, state, action):
+    def forward_base(self,
+                    state: jnp.ndarray,
+                    action: jnp.ndarray) -> jnp.ndarray:
         x = jnp.concatenate([state, action], axis=-1)
         x = jax.nn.relu(jnp.dot(x, self.params["fc1"]))
         x = jax.nn.relu(jnp.dot(x, self.params["fc2"]))
@@ -74,34 +81,50 @@ class BaseCriticNetwork(CriticNetwork):
     '''
     No fancy stuff
     '''
-    def __init__(self, state_dim, action_dim, hidden_dim=256):
+    def __init__(self,
+                state_dim: int,
+                action_dim: int,
+                hidden_dim: int=256):
         super().__init__(state_dim, action_dim, hidden_dim)
         self.params.update({
             "Q": jax.random.normal(jax.random.PRNGKey(2), (hidden_dim, 1))
         })
 
-    def forward(self, state, action):
+    def forward(self,
+                state: jnp.ndarray,
+                action: jnp.ndarray) -> jnp.ndarray:
         x = self.forward_base(state, action)
         Q = jnp.dot(x, self.params["Q"])
         return Q        
     
-    def compute_td_target(self, reward, next_states, next_actions, not_done, gamma):
+    def compute_td_target(self,
+                        reward: jnp.ndarray,
+                        next_states: jnp.ndarray,
+                        next_actions: jnp.ndarray,
+                        not_done: jnp.ndarray,
+                        gamma: float) -> jnp.ndarray:
         # Basic:  Q(s, a) = r + \gamma * Q(s', a')
         '''
         This function calculates the TD target for the critic.
 
         params:
-        reward: Reward [jnp.array]
-        next_states: Next state [jnp.array]
-        next_actions: Next action [jnp.array]
-        not_done: Not done flag [jnp.array]
+        reward: Reward [jnp.ndarray]
+        next_states: Next state [jnp.ndarray]
+        next_actions: Next action [jnp.ndarray]
+        not_done: Not done flag [jnp.ndarray]
         gamma: Discount factor [float]
+
+        returns:
+        td_target: TD target [jnp.ndarray]
         '''
         next_q_value = self.forward(next_states, next_actions)
         td_target = reward + gamma * not_done * next_q_value
         return td_target
     
-    def compute_loss(self, states, actions, target_q_value):
+    def compute_loss(self,
+                    states: jnp.ndarray,
+                    actions: jnp.ndarray,
+                    target_q_value: jnp.ndarray) -> float:
         # Get current Q-values from the critic for the sampled state-action pairs
         q_value = self.critic_network.forward(states, actions)
 
@@ -118,30 +141,43 @@ class DoubleCriticNetwork(CriticNetwork):
     hidden_dim: dimension of the hidden layers [int]
 
     returns:
-    Q_1: Q-function of the first critic [jnp.array]
-    Q_2: Q-function of the second critic [jnp.array]
+    Q_1: Q-function of the first critic [jnp.ndarray]
+    Q_2: Q-function of the second critic [jnp.ndarray]
     '''
-    def __init__(self, state_dim, action_dim, hidden_dim=256):
+    def __init__(self,
+                state_dim: int,
+                action_dim: int,
+                hidden_dim: int=256):
         super().__init__(state_dim, action_dim, hidden_dim)
         self.params.update({
             "Q_1": jax.random.normal(jax.random.PRNGKey(2), (hidden_dim, 1)),
             "Q_2": jax.random.normal(jax.random.PRNGKey(3), (hidden_dim, 1))
         })
 
-    def forward(self, state, action):
+    def forward(self,
+                state: jnp.ndarray,
+                action: jnp.ndarray) -> jnp.ndarray:
         x = self.forward_base(state, action)
         Q_1 = jnp.dot(x, self.params["Q_1"])
         Q_2 = jnp.dot(x, self.params["Q_2"])
         return Q_1, Q_2
     
     # Double: Q(s,a) = r + \gamma * min(Q_1(s', a'), Q_2(s', a'))
-    def compute_td_target(self, reward, next_states, next_actions, not_done, gamma):
+    def compute_td_target(self,
+                        reward: jnp.ndarray,
+                        next_states: jnp.ndarray,
+                        next_actions: jnp.ndarray,
+                        not_done: jnp.ndarray,
+                        gamma: float) -> jnp.ndarray:
         next_q1, next_q2 = self.forward(next_states, next_actions)
         next_q_min = jnp.minimum(next_q1, next_q2)
         td_target = reward + gamma * not_done * next_q_min
         return td_target
     
-    def compute_loss(self, states, actions, target_q_value):
+    def compute_loss(self,
+                    states: jnp.ndarray,
+                    actions: jnp.ndarray,
+                    target_q_value: jnp.ndarray) -> float:
         # Get current Q-values from the critic for the sampled state-action pairs
         Q_1, Q_2 = self.critic_network.forward(states, actions)
 
@@ -160,14 +196,19 @@ class DistributionalCriticNetwork(CriticNetwork):
     support_range: range of the support [tuple]
 
     returns:
-    dist: probability distribution over the points [jnp.array]
+    dist: probability distribution over the points [jnp.ndarray]
 
     notes:
     support is a tensor showing the bins of the distribution (e.g. [-5, -4, -3, ..., 3, 4, 5])
     -5 is the first bin, -4 is the second bin, etc.
     The bins represent the value of the Q-function at that point.
     '''
-    def __init__(self, state_dim, action_dim, hidden_dim=256, num_points=51, support_range=(-10, 10)):
+    def __init__(self,
+                state_dim: int,
+                action_dim: int,
+                hidden_dim: int=256,
+                num_points: int=51,
+                support_range: tuple=(-10, 10)):
         super().__init__(state_dim, action_dim, hidden_dim)
         self.num_points = num_points
         self.support_range = support_range
@@ -177,15 +218,17 @@ class DistributionalCriticNetwork(CriticNetwork):
             "distributional_output": jax.random.normal(jax.random.PRNGKey(4), (hidden_dim, num_points))
         })
 
-    def forward(self, state, action):
+    def forward(self,
+                state: jnp.ndarray,
+                action: jnp.ndarray) -> jnp.ndarray:
         '''
         This function calculates the probability distribution of the critic.
         params:
-        state: state input [jnp.array]
-        action: action input [jnp.array]
+        state: state input [jnp.ndarray]
+        action: action input [jnp.ndarray]
 
         returns:
-        dist: probability distribution over the points [jnp.array]
+        dist: probability distribution over the points [jnp.ndarray]
         '''
         x = self.forward_base(state, action)
         distributional_output = jax.nn.softmax(jnp.dot(x, self.params["distributional_output"]), axis=-1)
@@ -193,19 +236,24 @@ class DistributionalCriticNetwork(CriticNetwork):
         return dist
     
     # Distributional: Q_Z(s, a) = r + \gamma * (1 - done) * z_i
-    def compute_td_target(self, reward, next_states, next_actions, not_done, gamma):
+    def compute_td_target(self,
+                        reward: jnp.ndarray,
+                        next_states: jnp.ndarray,
+                        next_actions: jnp.ndarray,
+                        not_done: jnp.ndarray,
+                        gamma: float) -> jnp.ndarray:
         '''
         Compute the TD target for a distributional critic.
 
         params:
-        reward: Reward from the sampled transition [jnp.array]
-        next_states: Next state from the sampled transition [jnp.array]
-        next_actions: Next action from the sampled transition [jnp.array]
-        not_done: Not done flags indicating whether episodes are ongoing [jnp.array]
+        reward: Reward from the sampled transition [jnp.ndarray]
+        next_states: Next state from the sampled transition [jnp.ndarray]
+        next_actions: Next action from the sampled transition [jnp.ndarray]
+        not_done: Not done flags indicating whether episodes are ongoing [jnp.ndarray]
         gamma: Discount factor for future rewards [float]
 
         returns:
-        projected_dist: Projected probability distribution for the TD target [jnp.array]
+        projected_dist: Projected probability distribution for the TD target [jnp.ndarray]
 
         steps:
         - Compute the next action using the target policy.
@@ -238,13 +286,16 @@ class DistributionalCriticNetwork(CriticNetwork):
 
         return projected_dist
     
-    def compute_loss(self, states, actions, target_distribution):
+    def compute_loss(self,
+                    states: jnp.ndarray,
+                    actions: jnp.ndarray,
+                    target_distribution: jnp.ndarray) -> float:
         '''
         Compute the loss for a distributional critic.
         params:
-        states: States from the sampled transitions [jnp.array]
-        actions: Actions from the sampled transitions [jnp.array]
-        target_distribution: Target probability distribution [jnp.array]
+        states: States from the sampled transitions [jnp.ndarray]
+        actions: Actions from the sampled transitions [jnp.ndarray]
+        target_distribution: Target probability distribution [jnp.ndarray]
 
         returns:
         critic_loss: Loss value for the distributional critic [float]
@@ -275,10 +326,15 @@ class DoubleDistributionalCriticNetwork(CriticNetwork):
     support_range: range of the support [tuple]
 
     returns:
-    dist_1: probability distribution of the first critic [jnp.array]
-    dist_2: probability distribution of the second critic [jnp.array]
+    dist_1: probability distribution of the first critic [jnp.ndarray]
+    dist_2: probability distribution of the second critic [jnp.ndarray]
     '''
-    def __init__(self, state_dim, action_dim, hidden_dim=256, num_points=51, support_range=(-10, 10)):
+    def __init__(self,
+                state_dim: int,
+                action_dim: int,
+                hidden_dim: int=256,
+                num_points: int=51,
+                support_range: tuple=(-10, 10)):
         super().__init__(state_dim, action_dim, hidden_dim)
         self.num_points = num_points
         self.support_range = support_range
@@ -289,16 +345,18 @@ class DoubleDistributionalCriticNetwork(CriticNetwork):
             "distributional_output_2": jax.random.normal(jax.random.PRNGKey(6), (hidden_dim, num_points))
         })
 
-    def forward(self, state, action):
+    def forward(self,
+                state: jnp.ndarray,
+                action: jnp.ndarray) -> jnp.ndarray:
         '''
         This function calculates the probability distribution of the critic.
         params:
-        state: state input [jnp.array]
-        action: action input [jnp.array]
+        state: state input [jnp.ndarray]
+        action: action input [jnp.ndarray]
 
         returns:
-        dist_1: probability distribution of the first critic [jnp.array]
-        dist_2: probability distribution of the second critic [jnp.array]
+        dist_1: probability distribution of the first critic [jnp.ndarray]
+        dist_2: probability distribution of the second critic [jnp.ndarray]
 
         notes:
         The probability distribution is calculated using the jax.nn.softmax function.
@@ -313,7 +371,12 @@ class DoubleDistributionalCriticNetwork(CriticNetwork):
         return dist_1, dist_2
 
     # Double Distributional: Q_Z(s, a) = r + \gamma * (1 - done) * min(z_1', z_2')
-    def compute_td_target(self, reward, next_states, next_actions, not_done, gamma):
+    def compute_td_target(self,
+                        reward: jnp.ndarray,
+                        next_states: jnp.ndarray,
+                        next_actions: jnp.ndarray,
+                        not_done: jnp.ndarray,
+                        gamma: float) -> jnp.ndarray:
         '''
         Compute the TD target for a DOUBLE distributional critic.
         '''
@@ -346,7 +409,10 @@ class DoubleDistributionalCriticNetwork(CriticNetwork):
 
         return projected_dist
 
-    def compute_loss(self, states, actions, target_distribution):
+    def compute_loss(self,
+                    states: jnp.ndarray,
+                    actions: jnp.ndarray,
+                    target_distribution: jnp.ndarray) -> float:
         '''
         Compute the loss for a double distributional critic.
         '''

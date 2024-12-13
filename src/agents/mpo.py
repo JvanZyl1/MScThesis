@@ -1,5 +1,7 @@
 import jax.numpy as jnp
 import jax
+import scipy
+from typing import Tuple
 
 from src.agents.qnetworks import PolicyNetwork                                                                        # Actor network
 from src.agents.qnetworks import DistributionalCriticNetwork, DoubleCriticNetwork, DoubleDistributionalCriticNetwork, BaseCriticNetwork  # Critic networks
@@ -9,7 +11,10 @@ class MPOLearner:
     '''
     MPO Learner with options for PER buffer, target networks, double critics, distributional critics, and N-step returns.
     '''
-    def __init__(self, state_dim, action_dim, config):
+    def __init__(self,
+                 state_dim: int,
+                 action_dim: int,
+                 config: dict):
         '''
         Initialize the MPO Learner.
         params:
@@ -25,7 +30,7 @@ class MPOLearner:
         - critic_type: Type of critic network [str]
         - num_points: Number of points for distributional critics [int]
         - support_range: Range of support for distributional critics [tuple]
-        - learning_rate: Learning rate [float]
+        - critic_lr: Learning rate for the critic network [float]
         - tau: Soft update factor [float]
         - seed: Random seed [int]
         - per_alpha: PER alpha parameter [float]
@@ -129,7 +134,7 @@ class MPOLearner:
 
         # Optimization parameters
         self.gamma = config['gamma']
-        self.learning_rate = config['learning_rate']
+        self.critic_lr = config['critic_lr']
         self.tau = config['tau']
         self.n_step = config['n_step']
         self.rng_key = jax.random.PRNGKey(config['seed'])
@@ -138,46 +143,58 @@ class MPOLearner:
         self.action_min = config['action_min']
         self.action_max = config['action_max']
 
-    def select_action(self, state):
+    def select_action(self,
+                      state: jnp.ndarray) -> jnp.ndarray:
         '''
         Select an action using the policy network.
         params:
-        state: Current state [jnp.array]
-        action_min: Minimum values of the action ranges [jnp.array]
-        action_max: Maximum values of the action ranges [jnp.array]
+        state: Current state [jnp.ndarray]
+        action_min: Minimum values of the action ranges [jnp.ndarray]
+        action_max: Maximum values of the action ranges [jnp.ndarray]
 
         returns:
-        action: Selected action [jnp.array]
+        action: Selected action [jnp.ndarray]
         '''
         mean, std = self.policy_network.forward(state)
         action = mean + std * jax.random.normal(self.rng_key, shape=mean.shape)
         action = jnp.clip(action, self.action_min, self.action_max)
         return action
 
-    def store_transition(self, state, action, reward, next_state, done):
+    def store_transition(self,
+                         state: jnp.ndarray,
+                         action: jnp.ndarray,
+                         reward: float,
+                         next_state: jnp.ndarray,
+                         done: bool):
         '''
         Store a transition in the replay buffer.
         params:
-        state: Current state [jnp.array]
-        action: Executed action [jnp.array]
+        state: Current state [jnp.ndarray]
+        action: Executed action [jnp.ndarray]
         reward: Received reward [float]
-        next_state: Next state [jnp.array]
+        next_state: Next state [jnp.ndarray]
         done: Terminal flag [bool]
         '''
         self.replay_buffer.add(state, action, reward, next_state, done)
 
-    def critic_update(self, states, actions, rewards, next_states, dones):
+    def critic_update(self,
+                      states: jnp.ndarray,
+                      actions: jnp.ndarray,
+                      rewards: jnp.ndarray,
+                      next_states: jnp.ndarray,
+                      dones: jnp.ndarray) -> Tuple[jnp.ndarray, jnp.ndarray]:
         '''
         Update the critic network.
         params:
-        states: States sampled from the replay buffer [jnp.array]
-        actions: Actions sampled from the replay buffer [jnp.array]
-        rewards: Rewards sampled from the replay buffer [jnp.array]
-        next_states: Next states sampled from the replay buffer [jnp.array]
-        dones: Done flags sampled from the replay buffer [jnp.array]
+        states: States sampled from the replay buffer [jnp.ndarray]
+        actions: Actions sampled from the replay buffer [jnp.ndarray]
+        rewards: Rewards sampled from the replay buffer [jnp.ndarray]
+        next_states: Next states sampled from the replay buffer [jnp.ndarray]
+        dones: Done flags sampled from the replay buffer [jnp.ndarray]
 
         returns:
-        target_q_values: Target Q-values for the critic update [jnp.array]
+        target_q_values: Target Q-values for the critic update [jnp.ndarray]
+        critic_loss: Loss of the critic network [jnp.ndarray]
 
         Note, different critic configurations:
         - Double critic
@@ -206,6 +223,67 @@ class MPOLearner:
             lambda param, gradient: param - self.critic_lr * gradient, self.critic_network.params, grad
         )
         return target_q_values, critic_loss
+    
+
+
+    def e_step(
+        self,
+        states: jnp.ndarray,
+        batch_size: int,
+        action_sample_size: int
+    ) -> Tuple[float, jnp.ndarray, jnp.ndarray]:
+        '''
+        Perform the E-step of MPO.
+
+        params:
+        states: Batch of states for the E-step [jnp.ndarray]
+        batch_size: Number of states in the batch [int]
+        action_sample_size: Number of actions to sample per state [int]
+
+        returns:
+        temp: Updated temperature parameter [float]
+        weights: Weights for the sampled actions [jnp.ndarray]
+        sampled_actions: Sampled actions for each state [jnp.ndarray]
+        '''
+        # Sample actions from the policy network
+        mean, log_std = self.policy_network.forward(states)
+        std = jnp.exp(log_std)
+        sampled_actions = mean + std * jax.random.normal(self.rng, (batch_size, action_sample_size, self.action_dim))
+        sampled_actions = jnp.clip(sampled_actions, -self.max_action, self.max_action)
+
+        # Evaluate Q-values for sampled actions
+        q_values = []
+        for i in range(action_sample_size):
+            q_value = self.critic_network.forward(states, sampled_actions[:, i, :])
+            if isinstance(q_value, tuple):  # Double critic
+                q_value = jnp.minimum(q_value[0], q_value[1])
+            q_values.append(q_value)
+        q_values = jnp.stack(q_values, axis=1)  # Shape: (batch_size, action_sample_size)
+
+        # Minimize the dual function to update temperature
+        def dual(temp):
+            softmax_weights = jax.nn.softmax(q_values / temp, axis=1)
+            dual_value = temp * self.eps_eta + temp * jnp.mean(
+                jax.scipy.special.logsumexp(q_values / temp, axis=1) - jnp.log(action_sample_size)
+            )
+            return dual_value
+
+        # Compute the gradient of the dual function
+        dual_grad = jax.grad(dual)
+        # Perform optimization (e.g., using SLSQP as in your example)
+        bounds = [(1e-6, None)]  # Avoid numerical instability
+        res = scipy.minimize(lambda x: dual(x), self.temp, jac=lambda x: dual_grad(x), bounds=bounds, method="SLSQP")
+        self.temp = jax.lax.stop_gradient(res.x)
+
+        # Compute weights for the sampled actions
+        weights = jax.nn.softmax(q_values / self.temp, axis=1)
+        weights = jnp.expand_dims(weights, axis=-1)  # Add an extra dimension for broadcasting
+
+        # Stop gradient for weights and temperature
+        weights = jax.lax.stop_gradient(weights)
+        self.temp = jax.lax.stop_gradient(self.temp)
+
+        return self.temp, weights, sampled_actions
 
     def update(self, batch_size):
         '''
@@ -217,7 +295,7 @@ class MPOLearner:
         states, actions, rewards, next_states, dones = self.replay_buffer.sample(batch_size, self.rng_key)
 
         # 1. Perform the critic update (Q-function update)
-        target_q_values = self.critic_update(states, actions, rewards, next_states, dones)
+        target_q_values, critic_loss = self.critic_update(states, actions, rewards, next_states, dones)
 
         # 2. Perform the E-step (Target policy update)
         weights, sampled_actions = self.e_step(states, target_q_values)
@@ -230,15 +308,7 @@ class MPOLearner:
 
 
 
-    def e_step(self, batch_size):
-        '''
-        NOT DONE
-        Perform an E-step of the MPO algorithm.
-        i.e. target policy update
-        \zeta_{\text{S, target}}(s_t; \theta^{\zeta_{\text{target}}}) \varpropto  \exp\left(\frac{Q(s, a)}{\nu}\right)
-
-        params:
-        '''
+   
 
     def m_step(self, batch_size):
         '''
