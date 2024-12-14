@@ -14,6 +14,8 @@ from src.utils.gaussian_likelihood import gaussian_likelihood                   
 from src.utils.kl_divergence import kl_divergence_multivariate_gaussian, std_lagrange_step        # KL divergence
 from src.utils.clip_gradients import clip_grads                                                                       # Gradient clipping
 
+jax.clear_backends()
+
 class MPOLearner:
     '''
     MPO Learner with options for PER buffer, target networks, double critics, distributional critics, and N-step returns.

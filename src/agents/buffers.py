@@ -2,6 +2,7 @@ from collections import deque
 import jax.numpy as jnp
 from typing import Tuple
 import jax
+jax.clear_backends()
 
 class ReplayBuffer:
     '''

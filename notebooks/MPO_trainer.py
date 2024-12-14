@@ -27,7 +27,7 @@ trainer = Trainer(
     agent=agent,
     num_epochs=num_epochs,
     batch_size=batch_size,
-    save_model_interval=config["save_model_interval"],
+    save_model_interval= num_epochs+1,#config["save_model_interval"],
     model_name="mpo_inverted_pendulum",
     note="Training MPO on Inverted Pendulum using doubledistributionalcritics_Nstep_Target_PER"
 )

@@ -2,6 +2,8 @@ import jax.numpy as jnp
 import jax
 from typing import Tuple
 
+jax.clear_backends()
+
 class PolicyNetwork:
     '''
     This class represents the policy network; essentially an actor.
@@ -394,24 +396,14 @@ class DistributionalCriticNetwork(CriticNetwork):
 
 class DoubleDistributionalCriticNetwork(CriticNetwork):
     '''
-    This class implements a double distributional critic network.
-    params:
-    state_dim: dimension of the state space [int]
-    action_dim: dimension of the action space [int]
-    hidden_dim: dimension of the hidden layers [int]
-    num_points: number of points in the distribution [int]
-    support_range: range of the support [tuple]
-
-    returns:
-    dist_1: probability distribution of the first critic [jnp.ndarray]
-    dist_2: probability distribution of the second critic [jnp.ndarray]
+    Double distributional critic network with improved numerical stability.
     '''
     def __init__(self,
-                state_dim: int,
-                action_dim: int,
-                hidden_dim: int=256,
-                num_points: int=51,
-                support_range: tuple=(-10, 10)):
+                 state_dim: int,
+                 action_dim: int,
+                 hidden_dim: int = 256,
+                 num_points: int = 51,
+                 support_range: tuple = (-10, 10)):
         super().__init__(state_dim, action_dim, hidden_dim)
         self.num_points = num_points
         self.support_range = support_range
@@ -422,101 +414,75 @@ class DoubleDistributionalCriticNetwork(CriticNetwork):
             "distributional_output_2": jax.random.normal(jax.random.PRNGKey(6), (hidden_dim, num_points))
         })
 
-    def forward(self,
-                state: jnp.ndarray,
-                action: jnp.ndarray) -> jnp.ndarray:
-        '''
-        This function calculates the probability distribution of the critic.
-        params:
-        state: state input [jnp.ndarray]
-        action: action input [jnp.ndarray]
-
-        returns:
-        dist_1: probability distribution of the first critic [jnp.ndarray]
-        dist_2: probability distribution of the second critic [jnp.ndarray]
-
-        notes:
-        The probability distribution is calculated using the jax.nn.softmax function.
-        Also, clipping is done to avoid numerical instability.
-
-        '''
+    def forward(self, state: jnp.ndarray, action: jnp.ndarray) -> Tuple[jnp.ndarray, jnp.ndarray]:
         x = self.forward_base(state, action)
+
+        # Compute and normalize distributions
         dist_1 = jax.nn.softmax(jnp.dot(x, self.params["distributional_output_1"]), axis=-1)
         dist_2 = jax.nn.softmax(jnp.dot(x, self.params["distributional_output_2"]), axis=-1)
-        dist_1 = jnp.clip(dist_1, a_min=1e-3)
-        dist_2 = jnp.clip(dist_2, a_min=1e-3)
+
+        # Clip and normalize distributions to ensure numerical stability
+        dist_1 = jnp.clip(dist_1, a_min=1e-3, a_max=1.0)
+        dist_1 /= jnp.sum(dist_1, axis=-1, keepdims=True)
+
+        dist_2 = jnp.clip(dist_2, a_min=1e-3, a_max=1.0)
+        dist_2 /= jnp.sum(dist_2, axis=-1, keepdims=True)
+
         return dist_1, dist_2
 
-    # Double Distributional: Q_Z(s, a) = r + \gamma * (1 - done) * min(z_1', z_2')
-    def compute_td_target(self,
-                        reward: jnp.ndarray,
-                        next_states: jnp.ndarray,
-                        next_actions: jnp.ndarray,
-                        not_done: jnp.ndarray,
-                        gamma: float) -> jnp.ndarray:
-        '''
-        Compute the TD target for a DOUBLE distributional critic.
-        '''
-        # Get the distributional Q-values.
-        next_dist_1, next_dist_2 = self.forward(next_states, next_actions)  
+    def compute_td_target(self, reward: jnp.ndarray, next_states: jnp.ndarray, next_actions: jnp.ndarray, not_done: jnp.ndarray, gamma: float) -> jnp.ndarray:
+        next_dist_1, next_dist_2 = self.forward(next_states, next_actions)
 
-        # Minimum distribution
+        # Compute the minimum distribution
         next_dist_min = jnp.minimum(next_dist_1, next_dist_2)
 
-        # Initialize the projected distribution with zeros.
+        # Initialize projected distribution
         projected_dist = jnp.zeros_like(next_dist_min)
 
-        # Iterate over each point in the fixed support of the distribution.
+        # Iterate over each point in the fixed support
         for i, z_i in enumerate(self.support):
-            # Compute the target value (tz) for each point in the support.
+            # Compute the target value (tz)
             tz = reward + gamma * not_done * z_i
 
-            # Clamp the target value to ensure it stays within the range of the support.
+            # Clamp the target value
             tz = jnp.clip(tz, self.support[0], self.support[-1])
 
-            # Map the target value (tz) to the corresponding bin in the fixed support.
+            # Map the target value to bins
             b = (tz - self.support[0]) / self.delta_z
+            lower = jnp.clip(jnp.floor(b).astype(int), 0, self.num_points - 1)
+            upper = jnp.clip(jnp.ceil(b).astype(int), 0, self.num_points - 1)
 
-            # Determine the indices of the lower and upper bins.
-            lower, upper = jnp.floor(b).astype(int), jnp.ceil(b).astype(int)
-
-            # Distribute the probability mass across the lower and upper bins proportionally.
+            # Distribute probability mass
             projected_dist = projected_dist.at[:, lower].add(next_dist_min[:, i] * (upper - b))
             projected_dist = projected_dist.at[:, upper].add(next_dist_min[:, i] * (b - lower))
 
         return projected_dist
 
-    def compute_loss(self,
-                    states: jnp.ndarray,
-                    actions: jnp.ndarray,
-                    target_distribution: jnp.ndarray) -> float:
-        '''
-        Compute the loss for a double distributional critic.
-        '''
-        # Get the predicted distributional Q-values for the current state-action pairs
+    def compute_loss(self, states: jnp.ndarray, actions: jnp.ndarray, target_distribution: jnp.ndarray) -> float:
         predicted_distribution_1, predicted_distribution_2 = self.forward(states, actions)
 
-        # Ensure numerical stability by adding a small epsilon to avoid log(0)
+        # Add small epsilon to avoid log(0)
         epsilon = 1e-6
         predicted_distribution_1 = jnp.clip(predicted_distribution_1, a_min=epsilon, a_max=1.0)
         predicted_distribution_2 = jnp.clip(predicted_distribution_2, a_min=epsilon, a_max=1.0)
 
-        # Compute the KL divergence between the target and predicted distributions
-        critic_loss = jnp.sum(target_distribution * jnp.log(target_distribution / predicted_distribution_1), axis=-1) + \
-                      jnp.sum(target_distribution * jnp.log(target_distribution / predicted_distribution_2), axis=-1)
+        # Compute KL divergence loss
+        kl_div_1 = jnp.sum(target_distribution * jnp.log((target_distribution + epsilon) / predicted_distribution_1), axis=-1)
+        kl_div_2 = jnp.sum(target_distribution * jnp.log((target_distribution + epsilon) / predicted_distribution_2), axis=-1)
         
-        # Return the mean loss across the batch
+        critic_loss = kl_div_1 + kl_div_2
         return jnp.mean(critic_loss)
-    
-    def evaluate_q_value(self,
-                        states: jnp.ndarray,
-                        actions: jnp.ndarray) -> jnp.ndarray:
+
+    def evaluate_q_value(self, states: jnp.ndarray, actions: jnp.ndarray) -> jnp.ndarray:
         dist_1, dist_2 = self.forward(states, actions)
+
+        # Compute Q-values by summing over the support
         q_value_1 = jnp.sum(dist_1 * self.support, axis=-1)
         q_value_2 = jnp.sum(dist_2 * self.support, axis=-1)
-        q_value = jnp.minimum(q_value_1, q_value_2)
-        return q_value
-    
+
+        # Return the minimum Q-value
+        return jnp.minimum(q_value_1, q_value_2)
+
     def replace(self, params: dict) -> 'DoubleDistributionalCriticNetwork':
         new_critic = DoubleDistributionalCriticNetwork(self.state_dim, self.action_dim, self.hidden_dim)
         new_critic.params = params
@@ -524,4 +490,3 @@ class DoubleDistributionalCriticNetwork(CriticNetwork):
 
     def __call__(self, state: jnp.ndarray, action: jnp.ndarray) -> jnp.ndarray:
         return self.evaluate_q_value(state, action)
-

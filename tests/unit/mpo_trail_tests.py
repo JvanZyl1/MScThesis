@@ -4,6 +4,8 @@ from src.agents.mpo import MPOLearner
 from src.agents.qnetworks import DoubleDistributionalCriticNetwork
 from configs.agents_parameters import config
 
+jax.clear_backends()
+
 import jax.numpy as jnp
 
 # RUN: python -m tests.unit.mpo_trail_tests

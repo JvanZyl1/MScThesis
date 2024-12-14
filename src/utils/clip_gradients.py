@@ -2,6 +2,8 @@ import jax
 import jax.numpy as jnp
 from typing import Any
 
+jax.clear_backends()
+
 def clip_grads(grads: Any, max_norm: float) -> Any:
     """
     Clip gradients to avoid exploding gradients.

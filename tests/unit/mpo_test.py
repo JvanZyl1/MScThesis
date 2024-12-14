@@ -3,6 +3,8 @@ import jax.numpy as jnp
 from src.agents.mpo import MPOLearner
 from configs.agents_parameters import config
 
+jax.clear_backends()
+
 # python -m tests.unit.mpo_test
 
 def test_mpo_update():
