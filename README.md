@@ -11,7 +11,7 @@ git clone https://github.com/JvanZyl1/MScThesis.git
 To create a new conda environment using the `environment.yml` file, run the following command:
 
 ```sh
-conda env create --name new_env_name -f [environment.yml]
+conda env create --name new_env_name -f [jax-gpu.yml]
 ```
 
 Check that torch is properly configured for CUDA, through the lines:
