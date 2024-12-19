@@ -5,7 +5,7 @@ config = {
     'gamma': 0.99,
     'hidden_dim': 256,
     'target_networks': True,
-    'critic_type': 'double_distributional',
+    'critic_type': 'basic',
     'num_points': 51,
     'support_range': (-10, 10),
     'critic_lr': 1e-3,

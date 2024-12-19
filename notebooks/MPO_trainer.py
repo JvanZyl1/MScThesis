@@ -21,7 +21,7 @@ def main():
     )
 
     # Initialize the Trainer
-    num_epochs = 10000
+    num_epochs = 40
     batch_size = 10
     trainer = Trainer(
         env = env,

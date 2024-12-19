@@ -244,9 +244,12 @@ class MPOLearner:
         - Double distributional critic
         - Normal critic
         '''
+        print("Critic Update")
         # 1. Compute the target TD
         mean, std = self.policy_network.forward(next_states)  # Get mean and std from policy
         next_actions = mean + std * jax.random.normal(self.rng_key, shape=mean.shape)  # Sample actions
+        # Clip the actions to the action range
+        next_actions = jnp.clip(next_actions, self.action_min, self.action_max)
 
         # Compute the target TD using the double critic's compute_td_target method
         target_q_values = self.critic_network.compute_td_target(
@@ -255,15 +258,32 @@ class MPOLearner:
 
         critic_loss = self.critic_network.compute_loss(states, actions, target_q_values)
 
+        # Compute gradients of the critic loss with respect to critic parameters
+        loss_fn = lambda params: self.critic_network.compute_loss(states, actions, target_q_values)
+
+        # Compute gradients using jax.grad
+        grad = jax.grad(loss_fn)(self.critic_network.params)
+
+        # Debugging gradients
+        grad_sums = jax.tree_util.tree_map(lambda g: jnp.sum(jnp.abs(g)), grad)
+        print("Gradients (sum of abs):", grad_sums)
+
+
         # Perform a gradient step to minimize the critic loss
         # Compute the gradient of the critic loss w.r.t. the critic network parameters
-        grad = jax.grad(lambda params: critic_loss)(self.critic_network.params)
+        #grad = jax.grad(lambda params: critic_loss)(self.critic_network.params)
+        grad = jax.grad(lambda params: self.critic_network.compute_loss(states, actions, target_q_values))(self.critic_network.params)
+        print("Gradients:", jax.tree_util.tree_map(lambda g: jnp.sum(jnp.abs(g)), grad))
         # Update the critic network parameters using the gradient
         # lambda function updates via SGD: param - lr * gradient
 
+        before_update = jax.tree_util.tree_map(lambda x: jnp.sum(x), self.critic_network.params)
         self.critic_network.params = jax.tree_util.tree_map(
             lambda param, gradient: param - self.critic_lr * gradient, self.critic_network.params, grad
         )
+        after_update = jax.tree_util.tree_map(lambda x: jnp.sum(x), self.critic_network.params)
+        print("Parameter Update:", {k: after_update[k] - before_update[k] for k in before_update})
+
         return target_q_values, critic_loss
     
     def e_step(

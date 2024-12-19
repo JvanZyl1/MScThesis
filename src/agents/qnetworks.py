@@ -4,6 +4,7 @@ from typing import Tuple
 
 jax.clear_caches()
 
+
 class PolicyNetwork:
     '''
     This class represents the policy network; essentially an actor.
@@ -430,7 +431,7 @@ class DoubleDistributionalCriticNetwork(CriticNetwork):
 
         return dist_1, dist_2
 
-    def compute_td_target(self, reward: jnp.ndarray, next_states: jnp.ndarray, next_actions: jnp.ndarray, not_done: jnp.ndarray, gamma: float) -> jnp.ndarray:
+    def compute_td_target(self, reward: jnp.ndarray, next_states: jnp.ndarray, next_actions: jnp.ndarray, not_done: jnp.ndarray, gamma: float) -> jnp.ndarray:       
         next_dist_1, next_dist_2 = self.forward(next_states, next_actions)
 
         # Compute the minimum distribution
@@ -459,20 +460,36 @@ class DoubleDistributionalCriticNetwork(CriticNetwork):
         return projected_dist
 
     def compute_loss(self, states: jnp.ndarray, actions: jnp.ndarray, target_distribution: jnp.ndarray) -> float:
-        predicted_distribution_1, predicted_distribution_2 = self.forward(states, actions)
+        # Forward pass to get predicted distributions
+        distribution_1, distribution_2 = self.forward(states, actions)
 
-        # Add small epsilon to avoid log(0)
-        epsilon = 1e-6
-        predicted_distribution_1 = jnp.clip(predicted_distribution_1, a_min=epsilon, a_max=1.0)
-        predicted_distribution_2 = jnp.clip(predicted_distribution_2, a_min=epsilon, a_max=1.0)
-
-        # Compute KL divergence loss
-        kl_div_1 = jnp.sum(target_distribution * jnp.log((target_distribution + epsilon) / predicted_distribution_1), axis=-1)
-        kl_div_2 = jnp.sum(target_distribution * jnp.log((target_distribution + epsilon) / predicted_distribution_2), axis=-1)
+        # Debugging, assert distributions sum to 1
+        print("yayay", jnp.sum(distribution_1, axis=-1))
+        assert jnp.sum(distribution_1, axis=-1) == 1
+        assert jnp.sum(distribution_2, axis=-1) == 1
+        assert jnp.sum(target_distribution, axis=-1) == 1
         
-        critic_loss = kl_div_1 + kl_div_2
-        return jnp.mean(critic_loss)
+        # Debugging shapes (use sparingly to avoid flooding)
+        assert distribution_1.shape == target_distribution.shape, "Mismatch in shapes of critic 1 and target distribution"
+        assert distribution_2.shape == target_distribution.shape, "Mismatch in shapes of critic 2 and target distribution"
+        
+        # Clip distributions for numerical stability
+        epsilon_clip = 1e-6
+        target_distribution = jnp.clip(target_distribution, a_min=epsilon_clip, a_max=1.0)
+        distribution_1 = jnp.clip(distribution_1, a_min=epsilon_clip, a_max=1.0)
+        distribution_2 = jnp.clip(distribution_2, a_min=epsilon_clip, a_max=1.0)
+        
+        # Compute KL divergence for each critic
+        kl_div_1 = jnp.sum(target_distribution * jnp.log(target_distribution / distribution_1), axis=-1)
+        kl_div_2 = jnp.sum(target_distribution * jnp.log(target_distribution / distribution_2), axis=-1)
+        
+        # Aggregate losses and compute mean
+        kl_div = kl_div_1 + kl_div_2
+        critic_loss = kl_div.mean()
+        
+        return critic_loss
 
+    
     def evaluate_q_value(self, states: jnp.ndarray, actions: jnp.ndarray) -> jnp.ndarray:
         dist_1, dist_2 = self.forward(states, actions)
 
