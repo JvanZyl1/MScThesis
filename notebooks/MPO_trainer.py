@@ -7,7 +7,7 @@ from src.agents.trainer import Trainer
 
 def main():
     # Initialize the MuJoCo environment (Inverted Pendulum)
-    env = gym.make("LunarLanderContinuous-v2")
+    env = gym.make("LunarLanderContinuous-v3")
 
     # Extract state and action dimensions
     state_dim = env.observation_space.shape[0]

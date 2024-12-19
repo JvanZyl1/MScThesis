@@ -1,0 +1,27 @@
+<mujoco model="rocket">
+    <option gravity="0 0 -9.81" timestep="0.01" integrator="RK4"/>
+    
+    <!-- Default Settings -->
+    <default>
+        <geom type="cylinder" size="0.5 2" rgba="0.8 0.3 0.3 1"/>
+        <joint type="free"/>
+        <motor ctrlrange="0 1000"/>
+    </default>
+    
+    <!-- World Body -->
+    <worldbody>
+        <!-- Rocket -->
+        <body name="rocket" pos="0 0 5">
+            <geom name="main_body" size="0.5 2" mass="10"/>
+            <joint name="free_joint"/>
+            
+            <!-- Thruster -->
+            <site name="thruster" pos="0 0 -2.5" size="0.1" rgba="0.2 0.8 0.2 1"/>
+        </body>
+    </worldbody>
+
+    <!-- Actuator for Thruster -->
+    <actuator>
+        <motor name="thrust" joint="free_joint" gear="1"/>
+    </actuator>
+</mujoco>

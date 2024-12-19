@@ -2,7 +2,7 @@ import jax
 import jax.numpy as jnp
 from typing import Any
 
-jax.clear_backends()
+jax.clear_caches()
 
 def clip_grads(grads: Any, max_norm: float) -> Any:
     """

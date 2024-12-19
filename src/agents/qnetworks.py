@@ -2,7 +2,7 @@ import jax.numpy as jnp
 import jax
 from typing import Tuple
 
-jax.clear_backends()
+jax.clear_caches()
 
 class PolicyNetwork:
     '''

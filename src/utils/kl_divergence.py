@@ -3,7 +3,7 @@ import jax
 import optax
 from typing import Tuple
 
-jax.clear_backends()
+jax.clear_caches()
 
 def kl_divergence_multivariate_gaussian(mean_p: jnp.ndarray,
                                         std_p: jnp.ndarray,

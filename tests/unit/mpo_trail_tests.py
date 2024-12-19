@@ -4,7 +4,7 @@ from src.agents.mpo import MPOLearner
 from src.agents.qnetworks import DoubleDistributionalCriticNetwork
 from configs.agents_parameters import config
 
-jax.clear_backends()
+jax.clear_caches()
 
 import jax.numpy as jnp
 
