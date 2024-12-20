@@ -576,11 +576,16 @@ class MPOLearner:
             #print("Critic network output shape:", self.critic_network(states, actions).shape)
             #print("Indices shape:", indices.shape)
             # Calculate TD errors for priority updates
-            scalar_target_q_values = jnp.sum(target_q_values * self.critic_network.support, axis=-1)  # Shape: (10,)
+            # COmmented as no distributional anymore
+            #scalar_target_q_values = jnp.sum(target_q_values * self.critic_network.support, axis=-1)  # Shape: (10,)
             #print("Scalar target Q-values shape:", scalar_target_q_values.shape)
             critic_output_q_values = self.critic_network.evaluate_q_value(states, actions)           # Shape: (10,)
             #print("Critic output Q-values shape:", critic_output_q_values.shape)
-            td_errors = jnp.abs(scalar_target_q_values - critic_output_q_values).flatten()           # Shape: (10,)
+            td_errors = jnp.abs(target_q_values - critic_output_q_values).flatten()           # Shape: (10,)
+            print('target q values shape', target_q_values.shape)
+            print('critic ouptut q values shape', critic_output_q_values.shape)
+            print('indices shape', indices.shape)
+            print('td_errors shape', td_errors.shape)
             #print("TD errors shape:", td_errors.shape)
             self.replay_buffer.update_priorities(indices, td_errors)
 

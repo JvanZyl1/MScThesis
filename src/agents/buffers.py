@@ -102,11 +102,6 @@ class ReplayBuffer:
         return len(self.buffer)
 
 
-import jax
-import jax.numpy as jnp
-from collections import deque
-from typing import Tuple
-
 class PrioritizedReplayBuffer:
     '''
     This class implements a prioritized replay buffer.

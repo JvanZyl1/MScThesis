@@ -142,6 +142,7 @@ class BaseCriticNetwork(CriticNetwork):
         '''
         next_q_value = self.forward(next_states, next_actions)
         td_target = reward + gamma * not_done * next_q_value
+        print('td in critic shape', td_target.shape)
         return td_target
     
     def evaluate_q_value(self,
