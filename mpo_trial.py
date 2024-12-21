@@ -4,6 +4,7 @@ from flax import linen as nn
 jax.clear_caches()
 from collections import deque
 from typing import Tuple
+import scipy
 
 import optax
 
@@ -510,7 +511,8 @@ class HybridMPO:
                  batch_size: int = 256,
                  tau: float = 0.005,
                  critic_lr: float = 3e-4,
-                 critic_grad_max_norm : float = 10):  # Added critic learning rate
+                 critic_grad_max_norm : float = 10,
+                 temperature_updated_learned_bool : bool = False):  # Added critic learning rate
 
         self.critic = DoubleDistributionalCritic(state_dim=state_dim, action_dim=action_dim)
         self.actor = Actor(state_dim=state_dim, action_dim=action_dim, hidden_dim=hidden_dim_actor, stochastic=True)
@@ -532,6 +534,9 @@ class HybridMPO:
         self.actor_params = self.actor.init(self.rng_key, jnp.zeros((1, state_dim)))
         self.critic_params = self.critic.init(self.rng_key, jnp.zeros((1, state_dim)), jnp.zeros((1, action_dim)))
         self.target_critic_params = self.critic_params
+
+        # Temperature update method
+        self.temperature_updated_learned_bool = temperature_updated_learned_bool
 
     def critic_update(self):
         """
@@ -595,9 +600,126 @@ class HybridMPO:
 
         # Return the computed critic loss for logging or monitoring
         return critic_loss
+    
+    def sample_actions(self,
+                       states: jnp.ndarray) -> jnp.ndarray:
+        """
+        Sample actions from the policy network given the input states.
 
-    def m_step():
+        Args:
+        states: Input states to the policy network [batch, state_dim].
+
+        Returns:
+        actions: Sampled actions from the policy network [batch, action_dim].
+        """
+
+        mean, std = actor_forward(self.actor, self.actor_params, states)
+        # Sample actions from the Gaussian distribution
+        actions = jax.random.normal(self.rng_key, mean.shape) * std + mean
+        actions = jnp.clip(actions, self.action_min, self.action_max)
+        return actions
+    
+    # LEARNED TEMPERATURE
+    def temperature_update_learned(self,
+                                   q_logits : jnp.ndarray):
+        """
+        Learn the temperature parameter through gradient descent.
+        """
+        target_entropy = self.kl_constraint_temperature  # Desired entropy
+        current_entropy = -jnp.mean(jax.scipy.special.logsumexp(q_logits / self.temp, axis=1))
+        temp_loss = (current_entropy - target_entropy) ** 2
+
+        temp_grad = jax.grad(lambda temp: temp_loss)(self.temp)
+        self.temp -= self.temp_lr * temp_grad  # Update using gradient descent
+        self.temp = jnp.clip(self.temp, 1e-6, None)  # Avoid instability
+
+    def temperature_update(self,
+                           q_logits : jnp.ndarray)
+        # Define the dual function for the temperature parameter
+        def dual(temp: float) -> float:
+            """
+            Computes the dual function for temperature optimization.
+
+            Args:
+                temp: Current temperature parameter [float].
+
+            Returns:
+                dual_value: Value of the dual function [float].
+            """
+            # Use the KL constraint and log-sum-exp for exploration-exploitation trade-off
+            dual_value = temp * self.kl_constraint_temperature + temp * jnp.mean(
+                jax.scipy.special.logsumexp(q_logits / temp, axis=1) - jnp.log(self.action_sample_size)
+            )
+            return dual_value
+
+        # Optimize the temperature parameter
+        def dual_grad(temp: float) -> float:
+            """
+            Gradient of the dual function with respect to the temperature parameter.
+
+            Args:
+                temp: Current temperature parameter [float].
+
+            Returns:
+                gradient: Gradient value [float].
+            """
+            return jax.grad(dual)(temp)
+
+        # Initial guess for the temperature parameter
+        initial_temp = self.temp
+        bounds = [(1e-6, None)]  # Avoid numerical instability (temp > 0)
+
+        # Use a numerical optimizer (e.g., SLSQP) to minimize the dual function
+        res = scipy.optimize.minimize(
+            fun=lambda x: dual(x),
+            x0=initial_temp,
+            jac=lambda x: dual_grad(x),
+            bounds=bounds,
+            method="SLSQP"
+        )
+
+        # Update the temperature parameter
+        self.temp = jnp.array(res.x).item()  # Ensure compatibility with JAX
+
+
+    def e_step(self, states: jnp.ndarray):
+        """
+        Perform the E-step (Target policy update).
+
+        Args:
+            states: Batch of states for the E-step [jnp.ndarray].
+
+        Returns:
+            weights: Weights for the sampled actions [jnp.ndarray].
+            sampled_actions: Sampled actions for each state [jnp.ndarray].
+        """
+        # 1) Sample actions from the current policy
+        sampled_actions = self.sample_actions(states)
+
+        # 2) Compute the Q-values for the current state-action pairs
+        q1_logits, q2_logits, _ = self.critic.apply(self.critic_params, states, sampled_actions)
+
+        # 3) Combine Q-values (e.g., take the minimum for conservative Q-learning)
+        q_logits = jnp.minimum(q1_logits, q2_logits)
+
+        # 4) Update temperature
+        if not self.temperature_updated_learned_bool:
+            self.temperature_update(q_logits)
+        else:
+            self.temperature_update_learned(q_logits)
         
+        # 5) Compute weights for the sampled actions
+        weights = jax.nn.softmax(q_logits / self.temp, axis=1)
+        weights = jnp.expand_dims(weights, axis=-1)  # Add dimension for compatibility
+
+        # 6) Stop gradient for weights and temperature to ensure stability
+        weights = jax.lax.stop_gradient(weights)
+        self.temp = jax.lax.stop_gradient(self.temp)
+
+        return weights, sampled_actions
+    raise NotImplementedError"Test e_step method"
+
+
 '''
     def e_step():
 
