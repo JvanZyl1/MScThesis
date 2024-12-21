@@ -5,6 +5,8 @@ jax.clear_caches()
 from collections import deque
 from typing import Tuple
 
+import optax
+
 
 # Helper functions
 @jax.jit
@@ -67,6 +69,27 @@ def gaussian_likelihood(actions: jnp.ndarray,
         + jnp.log(2 * jnp.pi)  # Constant factor
     )
     return log_prob.sum(axis=-1)  # Sum over the action dimensions
+
+@jax.jit
+def clip_grads(grads: jnp.ndarray, max_norm: float) -> jnp.ndarray:
+    """
+    Clips gradients by their global norm to ensure stability.
+
+    Args:
+        grads: Gradients to clip, as a PyTree.
+        max_norm: Maximum norm for the gradients.
+
+    Returns:
+        Clipped gradients with the same structure as the input.
+    """
+    # Compute the global norm
+    norm = jnp.sqrt(sum(jnp.sum(jnp.square(x)) for x in jax.tree_util.tree_leaves(grads)))
+    # Compute scaling factor
+    scale = jnp.minimum(1.0, max_norm / (norm + 1e-6))
+    # Scale gradients
+    clipped_grads = jax.tree_util.tree_map(lambda x: x * scale, grads)
+    return clipped_grads
+
 
 
 class Actor(nn.Module):
@@ -182,7 +205,57 @@ class DoubleDistributionalCritic(nn.Module):
         q2 = nn.Dense(self.num_points)(q2)  # Distribution 2 output
 
         return q1, q2, z
-    
+
+@jax.jit
+def project_distribution(next_dist: jnp.ndarray,
+                         z: jnp.ndarray,
+                         rewards: jnp.ndarray,
+                         gamma: float,
+                         dones: jnp.ndarray) -> jnp.ndarray:
+    """
+    Projects the target distribution (Tz) onto the fixed support of z.
+
+    Args:
+        next_dist: Target distribution from the next state-action pair [batch, num_points].
+        z: Support of the distribution [num_points].
+        rewards: Observed rewards [batch].
+        gamma: Discount factor [float].
+        dones: Done flags, indicating terminal states [batch].
+
+    Returns:
+        projected_dist: Projected distribution [batch, num_points].
+    """
+    # Compute Tz (Bellman update of the support)
+    Tz = rewards[:, None] + gamma * z[None, :] * (1.0 - dones[:, None])
+    Tz = jnp.clip(Tz, z[0], z[-1])  # Clip to the support range
+
+    # Calculate the projection
+    b = (Tz - z[0]) / (z[1] - z[0])  # Relative positions on the support
+    lower = jnp.floor(b).astype(jnp.int32)  # Lower indices
+    upper = jnp.ceil(b).astype(jnp.int32)  # Upper indices
+
+    lower = jnp.clip(lower, 0, z.shape[0] - 1)  # Bound indices within range
+    upper = jnp.clip(upper, 0, z.shape[0] - 1)
+
+    # Initialize the projected distribution
+    projected_dist = jnp.zeros_like(next_dist)
+
+    # Distribute the probabilities across the lower and upper bins
+    l_indices = jnp.arange(next_dist.shape[0])[:, None], lower
+    u_indices = jnp.arange(next_dist.shape[0])[:, None], upper
+
+    # Update the projected distribution
+    projected_dist = projected_dist.at[l_indices].add(next_dist * (upper - b))
+    projected_dist = projected_dist.at[u_indices].add(next_dist * (b - lower))
+
+    # Ensure numerical stability
+    epsilon = 1e-6
+    projected_dist = jnp.clip(projected_dist, a_min=epsilon, a_max=1.0)
+    projected_dist /= jnp.sum(projected_dist, axis=-1, keepdims=True)  # Normalize to a valid distribution
+
+    return projected_dist
+
+
 @jax.jit
 def calculate_td_error(q1_logits : jnp.ndarray,
                     q2_logits : jnp.ndarray,
@@ -254,6 +327,44 @@ def calculate_td_error(q1_logits : jnp.ndarray,
 
     # Note that critic loss is the sum of the TD errors
     return td_error_q1, td_error_q2
+
+
+@jax.jit
+def compute_critic_loss(q1_logits: jnp.ndarray,
+                        q2_logits: jnp.ndarray,
+                        target_dist: jnp.ndarray,
+                        weights: jnp.ndarray) -> jnp.ndarray:
+    """
+    Computes the loss for a distributional critic using KL divergence.
+
+    Args:
+        q1_logits: Logits for the first Q-value distribution [batch, num_points].
+        q2_logits: Logits for the second Q-value distribution [batch, num_points].
+        target_dist: Target probability distribution [batch, num_points].
+        weights: Importance sampling weights for prioritized replay [batch].
+
+    Returns:
+        critic_loss: The critic loss value.
+    """
+    # Convert logits to probabilities using softmax
+    q1_probs = jax.nn.softmax(q1_logits, axis=-1)
+    q2_probs = jax.nn.softmax(q2_logits, axis=-1)
+
+    # Clip for numerical stability
+    epsilon = 1e-6
+    q1_probs = jnp.clip(q1_probs, a_min=epsilon, a_max=1.0)
+    q2_probs = jnp.clip(q2_probs, a_min=epsilon, a_max=1.0)
+    target_dist = jnp.clip(target_dist, a_min=epsilon, a_max=1.0)
+
+    # Compute KL divergence for each distribution
+    kl_loss_q1 = jnp.sum(target_dist * jnp.log(target_dist / q1_probs), axis=-1)
+    kl_loss_q2 = jnp.sum(target_dist * jnp.log(target_dist / q2_probs), axis=-1)
+
+    # Weighted loss for prioritized replay
+    critic_loss = jnp.mean(weights * (kl_loss_q1 + kl_loss_q2) / 2.0)
+
+    return critic_loss
+
 
 class PrioritizedReplayBuffer:
     '''
@@ -385,10 +496,91 @@ class PrioritizedReplayBuffer:
     def __len__(self) -> float:
         '''Return the current size of the buffer.'''
         return len(self.buffer)
+class HybridMPO:
+
+    def __init__(self,
+                 state_dim: int,
+                 action_dim: int,
+                 buffer_size: int,
+                 hidden_dim_actor: int = 256,
+                 gamma: float = 0.99,
+                 alpha: float = 0.6,
+                 beta: float = 0.4,
+                 beta_decay: float = 0.001,
+                 batch_size: int = 256,
+                 tau: float = 0.005,
+                 critic_lr: float = 3e-4,
+                 critic_grad_max_norm : float = 10):  # Added critic learning rate
+
+        self.critic = DoubleDistributionalCritic(state_dim=state_dim, action_dim=action_dim)
+        self.actor = Actor(state_dim=state_dim, action_dim=action_dim, hidden_dim=hidden_dim_actor, stochastic=True)
+        self.buffer = PrioritizedReplayBuffer(capacity=buffer_size,
+                                              n_step=1,
+                                              gamma=gamma,
+                                              alpha=alpha,
+                                              beta=beta,
+                                              beta_decay=beta_decay)
+
+        self.gamma = gamma  # Discount factor
+        self.batch_size = batch_size
+        self.tau = tau
+        self.critic_lr = critic_lr
+        self.critic_grad_max_norm = critic_grad_max_norm
+        self.rng_key = jax.random.PRNGKey(0)
+
+        # Initialize parameters
+        self.actor_params = self.actor.init(self.rng_key, jnp.zeros((1, state_dim)))
+        self.critic_params = self.critic.init(self.rng_key, jnp.zeros((1, state_dim)), jnp.zeros((1, action_dim)))
+        self.target_critic_params = self.critic_params
+
+    def critic_update(self):
+        """
+        Updates the critic network parameters using KL divergence loss.
+
+        Returns:
+            critic_loss: The loss value of the critic network.
+        """
+        # 1. Sample a batch of transitions from the replay buffer
+        states, actions, rewards, next_states, dones, indices, weights = self.buffer(self.batch_size, self.rng_key)
+
+        # 2. Calculate TD errors and target distributions
+        q1_logits, q2_logits, z = self.critic.apply(self.critic_params, states, actions)
+        not_done = 1 - dones
+
+        next_q1_logits, next_q2_logits, _ = self.critic.apply(self.target_critic_params, next_states, actions)
+        next_dist = jnp.minimum(jax.nn.softmax(next_q1_logits, axis=-1), jax.nn.softmax(next_q2_logits, axis=-1))
+        target_dist = project_distribution(next_dist, z, rewards, self.gamma, dones)
+
+        td_errors_q1, td_errors_q2 = calculate_td_error(q1_logits, q2_logits, z, rewards, not_done, next_dist, self.gamma)
+
+        # 3. Update replay buffer
+        priorities = td_errors_q1 + td_errors_q2
+        self.buffer.update_priorities(indices, priorities)
+
+        # 4. Compute critic loss
+        critic_loss = compute_critic_loss(q1_logits, q2_logits, target_dist, weights)
+
+        # 5. Perform gradient descent with gradient clipping
+        gradients = jax.grad(lambda params: compute_critic_loss(*self.critic.apply(params, states, actions), target_dist, weights))(self.critic_params)
+        clipped_gradients = clip_grads(gradients, max_norm=self.critic_grad_max_norm)
+        self.critic_params = jax.tree_util.tree_map(
+            lambda param, grad: param - self.critic_lr * grad, self.critic_params, clipped_gradients
+        )
+
+        # 6. Soft update the target network parameters
+        self.target_critic_params = jax.tree_util.tree_map(
+            lambda target, current: self.tau * current + (1 - self.tau) * target,
+            self.target_critic_params,
+            self.critic_params
+        )
+
+        return critic_loss
 
 
 '''
-class StandardMPO
+    def m_step():
+
+    def e_step():
 
 
 def main():
