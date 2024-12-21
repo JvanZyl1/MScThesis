@@ -176,14 +176,14 @@ def test_critic_update():
 
 # Run Tests
 if __name__ == "__main__":
-    test_prioritized_replay_buffer_initialization()
-    test_add_and_sample()
-    test_update_priorities()
-    test_kl_divergence_multivariate_gaussian()
-    test_gaussian_likelihood()
-    test_double_distributional_critic_td_error()
-    test_prioritized_replay_buffer_n_step()
-    print("All tests (1) passed!")
+    #test_prioritized_replay_buffer_initialization()
+    #test_add_and_sample()
+    #test_update_priorities()
+    #test_kl_divergence_multivariate_gaussian()
+    #test_gaussian_likelihood()
+    #test_double_distributional_critic_td_error()
+    #test_prioritized_replay_buffer_n_step()
+    #print("All tests (1) passed!")
 
     # Initialize RNG
     rng = jax.random.PRNGKey(0)

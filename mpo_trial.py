@@ -287,7 +287,7 @@ def calculate_td_error(q1_logits : jnp.ndarray,
     q2_probs = jax.nn.softmax(q2_logits, axis=-1)
 
     # Target distribution (Tz)
-    Tz = rewards[:, None] + gamma * z[None, :] * not_done[None, :]
+    Tz = rewards[:, None] + gamma * z[None, :] * not_done[:, None]
     Tz = jnp.clip(Tz, a_min=z[0], a_max=z[-1])
 
     # Project Tz onto the support z
@@ -541,45 +541,64 @@ class HybridMPO:
             critic_loss: The loss value of the critic network.
         """
         # 1. Sample a batch of transitions from the replay buffer
+        # Extract states, actions, rewards, next states, dones, indices, and importance sampling weights
         states, actions, rewards, next_states, dones, indices, weights = self.buffer(self.batch_size, self.rng_key)
 
         # 2. Calculate TD errors and target distributions
+        # Apply the critic to compute the Q-value logits and distributional support (z) for the current state-action pairs
         q1_logits, q2_logits, z = self.critic.apply(self.critic_params, states, actions)
+        
+        # `not_done` is 1 for non-terminal states, used to mask terminal states in updates
         not_done = 1 - dones
 
+        # Apply the target critic to compute Q-value logits for the next state-action pairs
         next_q1_logits, next_q2_logits, _ = self.critic.apply(self.target_critic_params, next_states, actions)
+        
+        # Calculate the target distribution as the minimum between the two Q-value distributions
         next_dist = jnp.minimum(jax.nn.softmax(next_q1_logits, axis=-1), jax.nn.softmax(next_q2_logits, axis=-1))
+        
+        # Project the next state distribution to align with the support of the current distribution
         target_dist = project_distribution(next_dist, z, rewards, self.gamma, dones)
 
+        # Calculate TD errors for both Q-value distributions
+        # These errors quantify the difference between the current and target distributions
         td_errors_q1, td_errors_q2 = calculate_td_error(q1_logits, q2_logits, z, rewards, not_done, next_dist, self.gamma)
 
         # 3. Update replay buffer
+        # Update the priorities in the replay buffer using the TD errors to focus learning on important samples
         priorities = td_errors_q1 + td_errors_q2
         self.buffer.update_priorities(indices, priorities)
 
         # 4. Compute critic loss
+        # Calculate the critic loss as the KL divergence between the predicted and target distributions
         critic_loss = compute_critic_loss(q1_logits, q2_logits, target_dist, weights)
 
         # 5. Perform gradient descent with gradient clipping
-        gradients = jax.grad(lambda params: compute_critic_loss(*self.critic.apply(params, states, actions), target_dist, weights))(self.critic_params)
+        # Compute gradients of the critic loss with respect to the critic parameters
+        gradients = jax.grad(lambda params: compute_critic_loss(*self.critic.apply(params, states, actions)[:2], target_dist, weights))(self.critic_params)
+
+        # Clip gradients to prevent exploding gradients and improve stability
         clipped_gradients = clip_grads(gradients, max_norm=self.critic_grad_max_norm)
+        
+        # Update the critic parameters using the clipped gradients and learning rate
         self.critic_params = jax.tree_util.tree_map(
             lambda param, grad: param - self.critic_lr * grad, self.critic_params, clipped_gradients
         )
 
         # 6. Soft update the target network parameters
+        # Perform a soft update on the target network parameters to slowly track the main critic network
         self.target_critic_params = jax.tree_util.tree_map(
             lambda target, current: self.tau * current + (1 - self.tau) * target,
             self.target_critic_params,
             self.critic_params
         )
 
+        # Return the computed critic loss for logging or monitoring
         return critic_loss
 
-
-'''
     def m_step():
-
+        
+'''
     def e_step():
 
 
