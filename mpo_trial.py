@@ -6,9 +6,6 @@ from collections import deque
 from typing import Tuple
 import scipy
 
-import optax
-
-
 # Helper functions
 @jax.jit
 def kl_divergence_multivariate_gaussian(mean_p: jnp.ndarray,
@@ -143,10 +140,6 @@ class Actor(nn.Module):
             std = jnp.zeros_like(mean)
 
         return mean, std
-    
-@jax.jit
-def actor_forward(actor, params, state):
-    return actor.apply(params, state)
 
 class DoubleDistributionalCritic(nn.Module):
     """
@@ -420,7 +413,11 @@ class PrioritizedReplayBuffer:
             raise ValueError("Not enough samples in the buffer to sample a batch")
 
         priorities = self.priorities[:len(self.buffer)]
-        probabilities = (priorities ** self.alpha) / jnp.sum(priorities ** self.alpha)
+        if jnp.sum(priorities) == 0:
+            probabilities = jnp.ones_like(priorities) / len(priorities)
+        else:
+            probabilities = (priorities ** self.alpha) / jnp.sum(priorities ** self.alpha)
+        
         indices = jax.random.choice(rng_key, len(self.buffer), shape=(batch_size,), p=probabilities)
         samples = [self.buffer[idx] for idx in indices]
 
@@ -497,6 +494,8 @@ class PrioritizedReplayBuffer:
     def __len__(self) -> float:
         '''Return the current size of the buffer.'''
         return len(self.buffer)
+    
+
 class HybridMPO:
 
     def __init__(self,
@@ -537,6 +536,16 @@ class HybridMPO:
 
         # Temperature update method
         self.temperature_updated_learned_bool = temperature_updated_learned_bool
+        self.kl_constraint_temperature = action_dim # Desired entropy
+
+        # Intialize temperature parameter
+        self.temp = 1.0
+        self.temp_lr = 1e-3
+
+        # Define action sample size
+        self.action_min = -1.0  # Example bounds for normalized actions
+        self.action_max = 1.0
+        self.action_sample_size = 10
 
     def critic_update(self):
         """
@@ -601,23 +610,16 @@ class HybridMPO:
         # Return the computed critic loss for logging or monitoring
         return critic_loss
     
-    def sample_actions(self,
-                       states: jnp.ndarray) -> jnp.ndarray:
-        """
-        Sample actions from the policy network given the input states.
+    def actor_forward(self, params: dict, state: jnp.ndarray) -> Tuple[jnp.ndarray]:
+        return self.actor.apply(params, state)
 
-        Args:
-        states: Input states to the policy network [batch, state_dim].
 
-        Returns:
-        actions: Sampled actions from the policy network [batch, action_dim].
-        """
-
-        mean, std = actor_forward(self.actor, self.actor_params, states)
-        # Sample actions from the Gaussian distribution
+    def sample_actions(self, states: jnp.ndarray) -> jnp.ndarray:
+        mean, std = self.actor_forward(self.actor_params, states)
         actions = jax.random.normal(self.rng_key, mean.shape) * std + mean
         actions = jnp.clip(actions, self.action_min, self.action_max)
         return actions
+
     
     # LEARNED TEMPERATURE
     def temperature_update_learned(self,
@@ -633,43 +635,22 @@ class HybridMPO:
         self.temp -= self.temp_lr * temp_grad  # Update using gradient descent
         self.temp = jnp.clip(self.temp, 1e-6, None)  # Avoid instability
 
-    def temperature_update(self,
-                           q_logits : jnp.ndarray)
-        # Define the dual function for the temperature parameter
+    def temperature_update(self, q_logits: jnp.ndarray) -> None:
         def dual(temp: float) -> float:
-            """
-            Computes the dual function for temperature optimization.
-
-            Args:
-                temp: Current temperature parameter [float].
-
-            Returns:
-                dual_value: Value of the dual function [float].
-            """
-            # Use the KL constraint and log-sum-exp for exploration-exploitation trade-off
-            dual_value = temp * self.kl_constraint_temperature + temp * jnp.mean(
-                jax.scipy.special.logsumexp(q_logits / temp, axis=1) - jnp.log(self.action_sample_size)
+            dual_value = (
+                temp * self.kl_constraint_temperature
+                + temp * jnp.mean(
+                    jax.scipy.special.logsumexp(q_logits / temp, axis=1)
+                    - jnp.log(self.action_sample_size)
+                )
             )
-            return dual_value
+            return jnp.squeeze(dual_value)  # ensure scalar
 
-        # Optimize the temperature parameter
         def dual_grad(temp: float) -> float:
-            """
-            Gradient of the dual function with respect to the temperature parameter.
-
-            Args:
-                temp: Current temperature parameter [float].
-
-            Returns:
-                gradient: Gradient value [float].
-            """
             return jax.grad(dual)(temp)
 
-        # Initial guess for the temperature parameter
         initial_temp = self.temp
-        bounds = [(1e-6, None)]  # Avoid numerical instability (temp > 0)
-
-        # Use a numerical optimizer (e.g., SLSQP) to minimize the dual function
+        bounds = [(1e-6, None)]
         res = scipy.optimize.minimize(
             fun=lambda x: dual(x),
             x0=initial_temp,
@@ -677,10 +658,7 @@ class HybridMPO:
             bounds=bounds,
             method="SLSQP"
         )
-
-        # Update the temperature parameter
-        self.temp = jnp.array(res.x).item()  # Ensure compatibility with JAX
-
+        self.temp = jnp.array(res.x)
 
     def e_step(self, states: jnp.ndarray):
         """
@@ -717,11 +695,10 @@ class HybridMPO:
         self.temp = jax.lax.stop_gradient(self.temp)
 
         return weights, sampled_actions
-    raise NotImplementedError"Test e_step method"
 
 
 '''
-    def e_step():
+    def m_step():
 
 
 def main():
